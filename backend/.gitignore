@@ -1,0 +1,27 @@
+# Environment files — all variants ignored since they may contain real credentials
+.env
+.env.*
+
+# Virtual environment
+.venv/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Temp dirs created during repo cloning (spec 03+)
+/tmp/
