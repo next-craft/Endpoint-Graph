@@ -1,0 +1,47 @@
+# ── Environment files ─────────────────────────────────────────────────────────
+# All .env variants — may contain real credentials
+.env
+.env.*
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ── Python / Backend ──────────────────────────────────────────────────────────
+backend/.venv/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temp dirs created during repo cloning (analysis engine)
+/tmp/
+
+# ── Node / Frontend ───────────────────────────────────────────────────────────
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+frontend/out/
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.test.local
+frontend/.env.production.local
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Editor artifacts ──────────────────────────────────────────────────────────
+.vscode/*.code-workspace
+.idea/
+*.swp
+*.swo

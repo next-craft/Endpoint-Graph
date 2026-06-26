@@ -1,0 +1,23 @@
+{
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/.next/**": true,
+    "**/backend/.venv/**": true,
+    "**/__pycache__/**": true,
+    "**/.pytest_cache/**": true
+  },
+  "files.exclude": {
+    "**/node_modules": true,
+    "**/.next": true,
+    "**/backend/.venv": true,
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/*.pyc": true
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/.next": true,
+    "**/backend/.venv": true,
+    "**/__pycache__": true
+  }
+}
