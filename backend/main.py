@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import get_pool
 from models import HealthResponse
+from routers.analyze import router as analyze_router
 
 
 @asynccontextmanager
@@ -20,12 +21,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers registered here as specs are implemented:
-# from routers import services, endpoints, graph, analyze
+app.include_router(analyze_router)
+
+# Remaining routers registered here as specs are implemented:
+# from routers import services, endpoints, graph
 # app.include_router(services.router)
 # app.include_router(endpoints.router)
 # app.include_router(graph.router)
-# app.include_router(analyze.router)
 
 
 @app.get("/health", response_model=HealthResponse)
