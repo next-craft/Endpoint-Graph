@@ -15,6 +15,7 @@ export async function triggerAnalysis(repoUrl) {
     },
     body: JSON.stringify({ repo_url: repoUrl }),
   })
+  if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
@@ -23,6 +24,7 @@ export async function fetchGraph() {
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/graph`, {
     headers: { 'X-GitHub-Token': token },
   })
+  if (!res.ok) throw new Error(await res.text())
   return res.json()
 }
 
