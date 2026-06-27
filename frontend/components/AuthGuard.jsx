@@ -5,15 +5,18 @@ import { supabase } from '@/lib/supabase'
 
 export default function AuthGuard({ children }) {
   const router = useRouter()
-  const [checked, setChecked] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [session, setSession] = useState(null)
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (!session) router.replace('/login')
-      else setChecked(true)
+      if (!session) router.push('/login')
+      else setSession(session)
+      setLoading(false)
     })
   }, [router])
 
-  if (!checked) return null
+  if (loading) return null
+  if (!session) return null
   return children
 }

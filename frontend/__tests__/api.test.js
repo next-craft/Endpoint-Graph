@@ -25,6 +25,7 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8000'
   supabase.auth.getSession.mockResolvedValue(SESSION_WITH_TOKEN)
   global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
     json: jest.fn().mockResolvedValue({}),
   })
 })

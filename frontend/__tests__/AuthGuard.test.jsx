@@ -2,10 +2,10 @@ import '@testing-library/jest-dom'
 import { render, screen, waitFor } from '@testing-library/react'
 import AuthGuard from '@/components/AuthGuard'
 
-const mockReplace = jest.fn()
+const mockPush = jest.fn()
 
 jest.mock('next/navigation', () => ({
-  useRouter: () => ({ replace: mockReplace }),
+  useRouter: () => ({ push: mockPush }),
 }))
 
 jest.mock('@/lib/supabase', () => ({
@@ -22,7 +22,7 @@ beforeEach(() => {
   jest.clearAllMocks()
 })
 
-test('test_authguard_redirects_unauthenticated', async () => {
+test('test_authguard_redirects_when_no_session', async () => {
   supabase.auth.getSession.mockResolvedValue({ data: { session: null } })
 
   render(
@@ -32,12 +32,12 @@ test('test_authguard_redirects_unauthenticated', async () => {
   )
 
   await waitFor(() => {
-    expect(mockReplace).toHaveBeenCalledWith('/login')
+    expect(mockPush).toHaveBeenCalledWith('/login')
   })
   expect(screen.queryByText('protected')).not.toBeInTheDocument()
 })
 
-test('test_authguard_renders_children_when_authenticated', async () => {
+test('test_authguard_renders_children_when_session_exists', async () => {
   supabase.auth.getSession.mockResolvedValue({
     data: { session: { provider_token: 'tok' } },
   })
@@ -51,5 +51,5 @@ test('test_authguard_renders_children_when_authenticated', async () => {
   await waitFor(() => {
     expect(screen.getByText('protected')).toBeInTheDocument()
   })
-  expect(mockReplace).not.toHaveBeenCalled()
+  expect(mockPush).not.toHaveBeenCalled()
 })
