@@ -1,0 +1,36 @@
+openapi: "3.0.0"
+info:
+  title: Order Service
+  version: "1.0.0"
+paths:
+  /orders/create:
+    post:
+      summary: Create a new order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id:
+                  type: string
+                items:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Created order
+  /orders/{id}:
+    get:
+      summary: Get order by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Order object
