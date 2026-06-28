@@ -4,7 +4,9 @@ import dynamic from 'next/dynamic'
 import AuthGuard from '@/components/AuthGuard'
 import RepoInput from '@/components/RepoInput'
 import ImpactPanel from '@/components/ImpactPanel'
+import SearchBar from '@/components/SearchBar'
 import { fetchGraph } from '@/lib/api'
+import { filterGraph } from '@/lib/graphFilter'
 
 const DependencyGraph = dynamic(
   () => import('@/components/DependencyGraph'),
@@ -17,9 +19,11 @@ export default function GraphPage() {
   const [graphLoading, setGraphLoading] = useState(false)
   const [graphError, setGraphError] = useState(null)
   const [selectedEndpoint, setSelectedEndpoint] = useState(null)
+  const [search, setSearch] = useState('')
 
   async function handleAnalysisComplete() {
     setSelectedEndpoint(null)
+    setSearch('')
     setGraphLoading(true)
     setGraphError(null)
     try {
@@ -56,16 +60,23 @@ export default function GraphPage() {
     setSelectedEndpoint({ id: endpointId, label: node.data.label })
   }
 
+  const { visibleNodes, visibleEdges } = filterGraph(nodes, edges, search)
+
   return (
     <AuthGuard>
       <div>
         <RepoInput onAnalysisComplete={handleAnalysisComplete} />
         {graphError && <p>{graphError}</p>}
         {graphLoading && <p>Loading graph…</p>}
+        {nodes.length > 0 && (
+          <div className="px-4 py-2">
+            <SearchBar value={search} onChange={setSearch} />
+          </div>
+        )}
         {!graphLoading && nodes.length > 0 && (
           <DependencyGraph
-            nodes={nodes}
-            edges={edges}
+            nodes={visibleNodes}
+            edges={visibleEdges}
             onNodeClick={handleNodeClick}
           />
         )}
