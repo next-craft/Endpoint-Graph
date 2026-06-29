@@ -1,4 +1,5 @@
 import pytest
+import jwt
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 from contextlib import asynccontextmanager
@@ -33,6 +34,14 @@ def _make_pool(conn):
         yield conn
 
     pool.acquire = _acquire
+
+    # conn.transaction() must work as an async context manager so set_rls_context
+    # can be called at the start of every DB transaction.
+    @asynccontextmanager
+    async def _transaction():
+        yield
+
+    conn.transaction = _transaction
     return pool
 
 
@@ -603,3 +612,35 @@ async def test_get_graph_includes_endpoint_nodes():
     assert endpoint_node["name"] == "POST /payments/charge"
     assert data["edges"][0]["target"] == "endpoint-7"
     assert data["edges"][0]["source"] == "3"
+
+
+# ---------------------------------------------------------------------------
+# Auth header enforcement
+# ---------------------------------------------------------------------------
+
+async def test_services_route_rejects_missing_github_token():
+    # X-GitHub-Token is a required header — FastAPI returns 422 before any logic runs.
+    # get_current_user_id is overridden by the autouse fixture so only X-GitHub-Token matters here.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/services", headers={"Authorization": "Bearer test-jwt"})
+
+    assert resp.status_code == 422
+
+
+async def test_services_route_rejects_missing_jwt(real_auth):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/services", headers={"X-GitHub-Token": "test-token"})
+    assert resp.status_code == 422
+
+
+async def test_services_route_rejects_invalid_jwt(real_auth):
+    import auth as auth_module
+    mock_jwks = MagicMock()
+    mock_jwks.get_signing_key_from_jwt.side_effect = jwt.InvalidTokenError("bad token")
+    with patch.object(auth_module, "_jwks_client", mock_jwks):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/services", headers={
+                "X-GitHub-Token": "test-token",
+                "Authorization": "Bearer invalid.jwt.token",
+            })
+    assert resp.status_code == 401

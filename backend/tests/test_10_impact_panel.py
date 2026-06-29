@@ -42,6 +42,12 @@ def _make_pool(conn):
         yield conn
 
     pool.acquire = _acquire
+
+    @asynccontextmanager
+    async def _transaction():
+        yield
+
+    conn.transaction = _transaction
     return pool
 
 
