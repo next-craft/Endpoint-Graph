@@ -16,7 +16,7 @@ V1 shipped with no per-user isolation — all services, endpoints, and edges wer
 
 `auth.users` is managed by Supabase Auth — do not create or alter it.
 
-**Important — RLS scope in this architecture:** FastAPI connects to Supabase as the `postgres` superuser via `DATABASE_URL`, which bypasses RLS entirely. RLS here protects against direct anon-role access (e.g. someone calling PostgREST or the Supabase dashboard directly). Isolation in FastAPI queries is enforced by explicit `WHERE user_id = $n` clauses in every query — that enforcement is implemented in v2-02 and v2-03, not by RLS. Enabling RLS is still correct and adds defense-in-depth, but it does not make the CLAUDE.md claim ("even a bug in FastAPI cannot leak User A's data to User B") literally true for asyncpg queries.
+**RLS enforcement in this architecture:** FastAPI calls `set_rls_context(conn, user_id)` at the start of every DB transaction (implemented in v2-02). This sets `request.jwt.claims` and switches to `role = authenticated`, so `auth.uid()` returns the correct Supabase UUID and RLS policies are enforced even for asyncpg connections. The policies created in this migration are fully active for all FastAPI queries once v2-02 is implemented.
 
 ## Files to create
 None. This spec is executed entirely as SQL against the Supabase project via the Supabase MCP tool (`apply_migration`). No Python or JavaScript files are created.
