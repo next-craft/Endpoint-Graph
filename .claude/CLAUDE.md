@@ -62,7 +62,7 @@ specs/
 ```
 specs/
 ├── v2-01-db-migration.md      ← add user_id + repo_id to services, unique constraints, RLS
-├── v2-02-backend-auth.md      ← extract user_id from GitHub token, pass to all DB writes
+├── v2-02-backend-auth.md      ← verify Supabase ES256 JWT, extract user_id from sub claim, set RLS context per DB transaction
 ├── v2-03-upsert.md            ← upsert services + endpoints on re-analysis (no duplicates)
 ├── v2-04-recursive-scan.md    ← full-depth service discovery, skip IGNORED_DIRS
 ├── v2-05-js-parser.md         ← extend code_parser.py for .js/.jsx/.ts/.tsx
@@ -101,6 +101,7 @@ agents/
 | Styling | Tailwind CSS | v4.3 | Utility-first CSS, CSS-first config |
 | Graph visualization | React Flow | @xyflow/react latest | Interactive dependency graph |
 | Auth (frontend) | Supabase JS client | v2 | GitHub OAuth only — not for DB queries |
+| Auth (backend) | PyJWT + cryptography | latest | Verify Supabase ES256 JWT via JWKS, extract user_id |
 | Backend framework | FastAPI | latest | REST API + analysis engine |
 | Backend language | Python | 3.11+ | All backend code |
 | Static analysis | tree-sitter + tree-sitter-languages | latest | Parse Python + JS/TS code |
@@ -136,11 +137,12 @@ Next.js 16 — App Router, JavaScript, Tailwind v4
   └── fetch() to FastAPI (all data — graph, impact analysis, trigger analysis, repo list)
         ↓
 FastAPI — Python, asyncpg
-  ├── Reads X-GitHub-Token header from frontend requests
-  ├── Calls GitHub API to get user_id (GET /user)
+  ├── Reads Authorization: Bearer <supabase-jwt> header → verifies ES256 → extracts user_id (sub claim)
+  ├── Reads X-GitHub-Token header → used for repo cloning and GitHub API calls only
+  ├── Sets request.jwt.claims + role=authenticated per DB transaction → RLS enforces auth.uid()
   ├── Clones private/public repos using the GitHub token
   ├── Runs tree-sitter + PyYAML analysis on cloned code (Python + JS/TS)
-  └── asyncpg → Supabase (RLS enforces per-user isolation at DB layer)
+  └── asyncpg → Supabase (RLS enforces per-user isolation at DB layer — including FastAPI queries)
         ↓
 Supabase — PostgreSQL 15
   ├── auth.users (managed by Supabase Auth — do not touch directly)
@@ -152,8 +154,9 @@ Supabase — PostgreSQL 15
 **Rules that must never be broken:**
 1. Next.js uses the Supabase JS client for auth only. All graph/analysis data goes through FastAPI.
 2. FastAPI never imports Supabase JS client. It connects to PostgreSQL directly via asyncpg using `DATABASE_URL`.
-3. Every DB write from FastAPI includes `user_id` (extracted from GitHub token via GitHub API).
+3. Every DB transaction from FastAPI calls `set_rls_context(conn, user_id)` before any query. `user_id` is always the Supabase UUID extracted from the `sub` claim of the verified ES256 JWT — never from the GitHub API.
 4. `GET /graph` always takes a `repo_id` query param — never returns all repos mixed together.
+5. Every FastAPI route that touches the DB requires both `X-GitHub-Token` (for GitHub operations) and `Authorization: Bearer <supabase-jwt>` (for user identity + RLS).
 
 ---
 
@@ -184,7 +187,7 @@ endpointgraph/
 │   ├── main.py                ← FastAPI app, lifespan, router registration
 │   ├── database.py            ← asyncpg pool (create once, reuse)
 │   ├── models.py              ← Pydantic request/response models
-│   ├── auth.py                ← GitHub token extraction + user_id resolution
+│   ├── auth.py                ← GitHub token extraction + Supabase JWT (ES256) verification + RLS context setter
 │   ├── routers/
 │   │   ├── services.py        ← GET /services, DELETE /services/{id}
 │   │   ├── endpoints.py       ← GET /endpoints, GET /endpoints/{id}/impact-analysis
@@ -345,16 +348,29 @@ CREATE POLICY "users see own edges"
 3. Supabase Auth redirects to GitHub OAuth consent screen
 4. User approves → GitHub redirects back to /auth/callback
 5. Supabase exchanges code for tokens, stores session
-6. session.provider_token = GitHub OAuth token
-7. Frontend stores session in memory (Supabase handles this)
-8. User is redirected to /repos
-9. When user clicks Track on a repo:
-   - Frontend reads session.provider_token
-   - Sends it to FastAPI as X-GitHub-Token header
-   - FastAPI calls GET https://api.github.com/user to resolve user_id
-   - FastAPI uses the token to git clone the repo (public or private)
-   - All DB writes include user_id
+6. session.access_token  = Supabase JWT (ES256, sub = Supabase user UUID) — used for RLS
+7. session.provider_token = GitHub OAuth token — used for cloning + GitHub API only
+8. Frontend stores session in memory (Supabase handles this)
+9. User is redirected to /repos
+10. Every FastAPI request from the frontend sends two headers:
+    - Authorization: Bearer <session.access_token>   ← FastAPI verifies ES256, extracts sub → user_id
+    - X-GitHub-Token: <session.provider_token>        ← used only for git clone + GitHub API calls
+11. For every DB transaction FastAPI:
+    - Calls set_rls_context(conn, user_id) which sets request.jwt.claims + role=authenticated
+    - auth.uid() now returns the correct Supabase UUID → RLS enforced at DB layer
+    - user_id in every INSERT comes from the JWT sub claim, not from GitHub API
 ```
+
+### Supabase JWT configuration (one-time setup)
+
+Supabase signs JWTs with HS256 by default. To use ES256:
+1. Supabase Dashboard → Project Settings → API → JWT Settings
+2. Change signing algorithm to ES256
+3. Add the JWKS discovery URL to `backend/.env` as `SUPABASE_JWKS_URL`
+
+The JWKS URL is always: `https://[ref].supabase.co/auth/v1/.well-known/jwks.json`
+
+FastAPI uses `PyJWKClient` which fetches the JWKS endpoint once, caches the key set, and uses the `kid` in each JWT header to select the correct key. Key rotation is handled automatically — no manual key copying ever needed.
 
 ### Frontend auth setup
 
@@ -402,30 +418,32 @@ export async function GET(request) {
 ```
 
 ```javascript
-// lib/api.js — get GitHub token and attach to every FastAPI request
+// lib/api.js — attach both auth headers to every FastAPI request
 import { supabase } from './supabase'
 
-async function getGitHubToken() {
+// Returns both headers required by every FastAPI route
+async function getAuthHeaders() {
   const { data: { session } } = await supabase.auth.getSession()
-  return session?.provider_token
+  return {
+    'X-GitHub-Token': session?.provider_token,   // for git clone + GitHub API
+    'Authorization': `Bearer ${session?.access_token}`, // for JWT verification + RLS
+  }
 }
 
 export async function fetchUserRepos() {
-  const token = await getGitHubToken()
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/repos`, {
-    headers: { 'X-GitHub-Token': token }
+    headers: await getAuthHeaders()
   })
   if (!res.ok) throw new Error(await extractError(res))
   return res.json()  // [{ name, full_name, private, updated_at, tracked, last_analyzed_at }]
 }
 
 export async function triggerAnalysis(repoUrl) {
-  const token = await getGitHubToken()
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/analyze`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-GitHub-Token': token
+      ...await getAuthHeaders()
     },
     body: JSON.stringify({ repo_url: repoUrl })
   })
@@ -434,30 +452,27 @@ export async function triggerAnalysis(repoUrl) {
 }
 
 export async function fetchGraph(repoId) {
-  const token = await getGitHubToken()
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_API_URL}/graph?repo_id=${encodeURIComponent(repoId)}`,
-    { headers: { 'X-GitHub-Token': token } }
+    { headers: await getAuthHeaders() }
   )
   if (!res.ok) throw new Error(await extractError(res))
   return res.json()
 }
 
 export async function fetchImpactAnalysis(endpointId) {
-  const token = await getGitHubToken()
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_API_URL}/endpoints/${endpointId}/impact-analysis`,
-    { headers: { 'X-GitHub-Token': token } }
+    { headers: await getAuthHeaders() }
   )
   if (!res.ok) throw new Error(await extractError(res))
   return res.json()
 }
 
 export async function deleteService(serviceId) {
-  const token = await getGitHubToken()
   const res = await fetch(
     `${process.env.NEXT_PUBLIC_API_URL}/services/${serviceId}`,
-    { method: 'DELETE', headers: { 'X-GitHub-Token': token } }
+    { method: 'DELETE', headers: await getAuthHeaders() }
   )
   if (!res.ok) throw new Error(await extractError(res))
 }
@@ -475,43 +490,71 @@ async function extractError(res) {
 }
 ```
 
-### Backend token extraction + user_id resolution
+### Backend JWT verification + RLS context
 
 ```python
 # auth.py
-import httpx
+import os, json
+import jwt  # PyJWT
+from jwt import PyJWKClient
 from fastapi import Header, HTTPException
 
-async def get_github_token(x_github_token: str = Header(alias="X-GitHub-Token")):
+# JWKS client fetches https://[ref].supabase.co/auth/v1/.well-known/jwks.json
+# once at startup and caches keys — handles key rotation automatically
+_jwks_client = PyJWKClient(os.getenv("SUPABASE_JWKS_URL"))
+
+async def get_github_token(x_github_token: str = Header(alias="X-GitHub-Token")) -> str:
     if not x_github_token:
         raise HTTPException(status_code=401, detail="GitHub token required")
     return x_github_token
 
-async def get_github_user_id(token: str) -> str:
-    async with httpx.AsyncClient() as client:
-        res = await client.get(
-            "https://api.github.com/user",
-            headers={"Authorization": f"Bearer {token}"}
+async def get_current_user_id(authorization: str = Header()) -> str:
+    """Verify Supabase ES256 JWT via JWKS, return the Supabase user UUID (sub claim)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization[7:]
+    try:
+        signing_key = _jwks_client.get_signing_key_from_jwt(token)
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256"],
+            audience="authenticated",
         )
-    if res.status_code != 200:
-        raise HTTPException(status_code=401, detail="Could not resolve GitHub user")
-    # GitHub node_id is a stable string ID that matches Supabase auth.users.raw_user_meta_data
-    # Use res.json()["id"] (integer) — map to Supabase user via sub claim in JWT
-    return str(res.json()["id"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    return payload["sub"]  # Supabase UUID — matches auth.users.id and services.user_id
+
+async def set_rls_context(conn, user_id: str) -> None:
+    """Set JWT claims + role for this transaction so RLS auth.uid() is enforced."""
+    claims = json.dumps({"sub": user_id, "role": "authenticated"})
+    await conn.execute("SELECT set_config('request.jwt.claims', $1, true)", claims)
+    await conn.execute("SELECT set_config('role', 'authenticated', true)")
 ```
 
 ```python
-# routers/analyze.py
+# routers/analyze.py — both dependencies required on every DB-touching route
 from fastapi import APIRouter, Depends
-from auth import get_github_token
+from auth import get_github_token, get_current_user_id, set_rls_context
+from database import get_pool
 from analysis.cloner import clone_repo
 
 router = APIRouter()
 
 @router.post("/analyze")
-async def analyze(request: AnalyzeRequest, token: str = Depends(get_github_token)):
+async def analyze(
+    request: AnalyzeRequest,
+    token: str = Depends(get_github_token),
+    user_id: str = Depends(get_current_user_id),
+):
     tmp_dir = clone_repo(request.repo_url, token)
-    # run analysis on tmp_dir, write to DB with user_id...
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await set_rls_context(conn, user_id)  # must be first — enables RLS for this tx
+            # now run all DB writes; auth.uid() returns user_id; RLS enforces isolation
 ```
 
 ---
@@ -624,7 +667,7 @@ def match_url_to_endpoint(url_path: str, known_paths: list[str]) -> str | None:
 ## FastAPI API contract
 
 Base URL local: `http://localhost:8000`
-All routes require `X-GitHub-Token` header.
+All routes require both headers: `X-GitHub-Token` and `Authorization: Bearer <supabase-jwt>`.
 
 | Method | Route | Request body / params | Returns |
 |---|---|---|---|
@@ -871,6 +914,7 @@ No inline `fetch()` inside components or pages. Every call to FastAPI goes throu
 ### backend/.env (never commit)
 ```
 DATABASE_URL=postgresql://postgres:[password]@db.[ref].supabase.co:5432/postgres
+SUPABASE_JWKS_URL=https://[ref].supabase.co/auth/v1/.well-known/jwks.json
 ```
 
 ### frontend/.env.local (never commit)
@@ -890,6 +934,7 @@ NEXT_PUBLIC_API_URL=https://your-fastapi-app.railway.app
 ### Railway environment variables (production backend)
 ```
 DATABASE_URL
+SUPABASE_JWKS_URL
 ```
 
 ---
@@ -963,8 +1008,12 @@ The frontend is straightforward enough that TypeScript would add friction withou
 ### No Docker
 Deploying to Vercel + Railway + Supabase. Docker is not needed.
 
-### RLS at the DB layer
-User isolation is enforced by Supabase RLS, not just application code. This means even a bug in FastAPI cannot leak User A's data to User B — the DB rejects it.
+### RLS at the DB layer via JWT (ES256)
+User isolation is enforced at two independent layers:
+1. **Application layer** — every query includes `WHERE user_id = $n` explicitly.
+2. **DB layer** — every asyncpg transaction calls `set_rls_context(conn, user_id)` which sets `request.jwt.claims` and `role = authenticated`. This makes `auth.uid()` return the correct Supabase UUID, and the RLS policies enforce it. Even if FastAPI had a bug that forgot the WHERE clause, the DB would reject the query.
+
+The `user_id` is always the Supabase UUID from the `sub` claim of the verified ES256 JWT — never from the GitHub API. This means `services.user_id` always matches `auth.users.id` exactly, and `auth.uid()` works correctly in RLS policies.
 
 ### Repo browser replaces URL input
 Users can only track repos they own (what the GitHub token can see). This removes the attack surface of users cloning arbitrary public repos through the backend and makes the UX self-evident.
@@ -979,7 +1028,7 @@ Users can only track repos they own (what the GitHub token can see). This remove
 ### In v2
 - [x] V1 fully shipped (login, analyze, graph, impact panel, search)
 - [ ] DB migration: add `user_id`, `repo_id`, `last_analyzed_at` to services; unique constraints; RLS on all tables
-- [ ] Backend: extract `user_id` from GitHub token, include in all DB writes
+- [ ] Backend: verify Supabase ES256 JWT, extract user_id from sub claim, set RLS context per DB transaction
 - [ ] Upsert services + endpoints on re-analysis (no duplicate rows)
 - [ ] Recursive service discovery — full depth, `IGNORED_DIRS` only
 - [ ] JS/TS parser — extend `code_parser.py` for `.js`, `.jsx`, `.ts`, `.tsx`
