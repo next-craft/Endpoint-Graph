@@ -14,7 +14,8 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from contextlib import asynccontextmanager
 from httpx import AsyncClient, ASGITransport
 from main import app
-from routers.analyze import repo_id_from_url, _is_service_folder, _safe_path
+from routers.analyze import repo_id_from_url, _safe_path
+from analysis.scanner import _is_service_folder
 
 
 HEADERS = {"X-GitHub-Token": "test-token"}
@@ -122,7 +123,7 @@ def test_is_service_folder_with_openapi_json(tmp_path):
 
 
 def test_is_service_folder_with_python_file(tmp_path):
-    """Folder containing a .py file (no openapi spec) is a service folder."""
+    """Folder containing main.py (a SERVICE_MARKER) is detected as a service folder."""
     (tmp_path / "main.py").write_text("# service")
     assert _is_service_folder(str(tmp_path)) is True
 
