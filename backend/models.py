@@ -55,5 +55,15 @@ class GraphOut(BaseModel):
     edges: list[GraphEdge]
 
 
+class RepoOut(BaseModel):
+    name: str
+    full_name: str
+    private: bool
+    updated_at: str
+    tracked: bool
+    last_analyzed_at: datetime | None
+    service_id: int | None
+
+
 class HealthResponse(BaseModel):
     status: str

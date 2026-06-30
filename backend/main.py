@@ -8,6 +8,7 @@ from routers.analyze import router as analyze_router
 from routers.services import router as services_router
 from routers.endpoints import router as endpoints_router
 from routers.graph import router as graph_router
+from routers.repos import router as repos_router
 
 
 @asynccontextmanager
@@ -34,6 +35,7 @@ app.include_router(analyze_router)
 app.include_router(services_router)
 app.include_router(endpoints_router)
 app.include_router(graph_router)
+app.include_router(repos_router, prefix="/repos")
 
 
 @app.get("/health", response_model=HealthResponse)
