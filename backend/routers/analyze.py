@@ -7,6 +7,7 @@ from database import get_pool
 from auth import get_github_token, get_current_user_id, set_rls_context
 from models import AnalyzeRequest, AnalyzeResponse
 from analysis.cloner import clone_repo, delete_repo
+from analysis.scanner import find_service_folders
 from analysis.spec_parser import parse_service
 from analysis.code_parser import extract_route_decorators, extract_http_calls
 from analysis.url_matcher import match_url_to_endpoint
@@ -34,15 +35,6 @@ def repo_id_from_url(repo_url: str) -> str:
     if len(parts) < 2 or not parts[0] or not parts[1]:
         raise ValueError(f"Cannot derive repo_id from URL: {repo_url!r}")
     return f"{parts[0]}/{parts[1]}"
-
-
-def _is_service_folder(folder_path: str) -> bool:
-    has_openapi = (
-        os.path.exists(os.path.join(folder_path, "openapi.yaml")) or
-        os.path.exists(os.path.join(folder_path, "openapi.json"))
-    )
-    has_python = bool(glob.glob(os.path.join(folder_path, "*.py")))
-    return has_openapi or has_python
 
 
 def _safe_path(file_path: str, tmp_dir: str) -> bool:
@@ -79,12 +71,7 @@ async def analyze(
     try:
         tmp_dir = clone_repo(request.repo_url, token)
 
-        service_folders = [
-            os.path.join(tmp_dir, entry)
-            for entry in os.listdir(tmp_dir)
-            if os.path.isdir(os.path.join(tmp_dir, entry))
-            and _is_service_folder(os.path.join(tmp_dir, entry))
-        ]
+        service_folders = find_service_folders(tmp_dir)
 
         pool = await get_pool()
 
