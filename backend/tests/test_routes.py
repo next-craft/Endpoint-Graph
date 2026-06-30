@@ -5,7 +5,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from contextlib import asynccontextmanager
 from httpx import AsyncClient, ASGITransport
 from main import app
-from routers.analyze import _extract_path
+from routers.analyze import _extract_path, repo_id_from_url
 
 
 HEADERS = {"X-GitHub-Token": "test-token"}
@@ -55,8 +55,8 @@ async def test_analyze_returns_ok_status(tmp_path):
     (svc_dir / "main.py").write_text("# service")
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None, None])  # no existing service, no existing endpoint
-    conn.fetchval = AsyncMock(return_value=1)
+    # service upsert returns the row id; endpoint upsert returns the row id (new row)
+    conn.fetchrow = AsyncMock(side_effect=[_Row({"id": 1}), _Row({"id": 1})])
     conn.fetch = AsyncMock(return_value=[])
     conn.execute = AsyncMock(return_value=None)
     pool = _make_pool(conn)
@@ -171,8 +171,8 @@ async def test_analyze_uses_openapi_when_present(tmp_path):
     (svc_dir / "main.py").write_text("# service code")
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(return_value=None)
-    conn.fetchval = AsyncMock(return_value=1)
+    # service upsert returns row (parse_service found no endpoints so no endpoint upsert call)
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
     conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
 
@@ -204,8 +204,8 @@ async def test_analyze_falls_back_to_decorators(tmp_path):
     (svc_dir / "main.py").write_text("# service code")
 
     conn = AsyncMock()
-    conn.fetchrow = AsyncMock(side_effect=[None])  # no existing service (no endpoints to insert)
-    conn.fetchval = AsyncMock(return_value=1)
+    # service upsert returns row (no endpoint upsert — extract_route_decorators returns [])
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
     conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
 
@@ -267,8 +267,9 @@ async def test_analyze_consumer_edge_upserted(tmp_path):
     ep_row = _Row({"id": 5, "method": "GET", "path": "/users/{id}", "service_id": 10})
 
     conn = AsyncMock()
-    # fetchrow called twice: once for service lookup (exists), once for edge pre-check (no existing edge)
-    conn.fetchrow = AsyncMock(side_effect=[svc_row, None])
+    # fetchrow called once: service upsert returns existing row (DO UPDATE path)
+    # edge insert now uses ON CONFLICT DO UPDATE via conn.execute — no pre-check fetchrow
+    conn.fetchrow = AsyncMock(return_value=svc_row)
     conn.fetch = AsyncMock(return_value=[ep_row])
     conn.execute = AsyncMock(return_value=None)
     pool = _make_pool(conn)
@@ -644,3 +645,238 @@ async def test_services_route_rejects_invalid_jwt(real_auth):
                 "Authorization": "Bearer invalid.jwt.token",
             })
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# repo_id_from_url unit tests
+# ---------------------------------------------------------------------------
+
+def test_repo_id_from_url_https():
+    assert repo_id_from_url("https://github.com/owner/name") == "owner/name"
+
+
+def test_repo_id_from_url_git_suffix():
+    assert repo_id_from_url("https://github.com/owner/name.git") == "owner/name"
+
+
+def test_repo_id_from_url_no_scheme():
+    assert repo_id_from_url("github.com/owner/name") == "owner/name"
+
+
+def test_repo_id_from_url_invalid():
+    with pytest.raises(ValueError):
+        repo_id_from_url("notgithub.com/x/y")
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_invalid_repo_url
+# ---------------------------------------------------------------------------
+
+async def test_analyze_invalid_repo_url():
+    # repo_id_from_url raises ValueError for non-github URLs;
+    # the route catches it and returns 422 before clone_repo is ever called.
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        resp = await client.post(
+            ANALYZE_URL,
+            json={"repo_url": "notgithub.com/x/y"},
+            headers=HEADERS,
+        )
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Invalid repo URL"
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_cleanup_on_db_failure
+# ---------------------------------------------------------------------------
+
+async def test_analyze_cleanup_on_db_failure(tmp_path):
+    # clone_repo succeeds; get_pool raises — delete_repo must still be called.
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo") as mock_delete, \
+         patch("routers.analyze.get_pool",
+               new_callable=AsyncMock, side_effect=Exception("DB unavailable")):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            with pytest.raises(Exception, match="DB unavailable"):
+                await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    mock_delete.assert_called_once_with(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_sets_user_id_and_repo_id
+# ---------------------------------------------------------------------------
+
+async def test_analyze_sets_user_id_and_repo_id(tmp_path):
+    svc_dir = tmp_path / "my-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service")
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
+    conn.fetch = AsyncMock(return_value=[])
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                ANALYZE_URL,
+                json={"repo_url": "https://github.com/test/repo"},
+                headers=HEADERS,
+            )
+
+    assert resp.status_code == 200
+    # First fetchrow call is the service upsert; check its positional args
+    call_pos_args = conn.fetchrow.call_args_list[0][0]
+    sql = call_pos_args[0]
+    assert "ON CONFLICT" in sql
+    assert "user_id" in sql
+    assert "repo_id" in sql
+    # user_id is $4 (index 4), repo_id is $5 (index 5)
+    assert call_pos_args[4] == "test-user-id"   # from conftest override
+    assert call_pos_args[5] == "test/repo"       # derived from URL
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_upsert_service_idempotent
+# ---------------------------------------------------------------------------
+
+async def test_analyze_upsert_service_idempotent(tmp_path):
+    svc_dir = tmp_path / "my-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service")
+
+    conn = AsyncMock()
+    # Both analyze calls use the upsert path; fetchrow always returns the row.
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
+    conn.fetch = AsyncMock(return_value=[])
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp1 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+            resp2 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp1.json()["services"] == 1
+    assert resp2.json()["services"] == 1
+    # Both calls used the upsert SQL
+    sql = conn.fetchrow.call_args_list[0][0][0]
+    assert "ON CONFLICT" in sql
+    assert "DO UPDATE" in sql
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_upsert_endpoint_idempotent
+# ---------------------------------------------------------------------------
+
+async def test_analyze_upsert_endpoint_idempotent(tmp_path):
+    svc_dir = tmp_path / "my-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service")
+
+    conn = AsyncMock()
+    # First analyze: service upsert → row; endpoint upsert → row (new)
+    # Second analyze: service upsert → row (DO UPDATE); endpoint upsert → None (DO NOTHING);
+    #   fallback SELECT → row
+    conn.fetchrow = AsyncMock(side_effect=[
+        _Row({"id": 1}),  # 1st analyze — service upsert
+        _Row({"id": 1}),  # 1st analyze — endpoint upsert (new)
+        _Row({"id": 1}),  # 2nd analyze — service upsert (DO UPDATE)
+        None,             # 2nd analyze — endpoint upsert (DO NOTHING)
+        _Row({"id": 1}),  # 2nd analyze — endpoint fallback SELECT
+    ])
+    conn.fetch = AsyncMock(return_value=[])
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators",
+               return_value=[{"method": "GET", "path": "/items"}]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp1 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+            resp2 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp1.json()["endpoints"] == 1
+    assert resp2.json()["endpoints"] == 1
+    # The endpoint upsert SQL uses ON CONFLICT DO NOTHING
+    endpoint_upsert_sql = conn.fetchrow.call_args_list[1][0][0]
+    assert "ON CONFLICT" in endpoint_upsert_sql
+    assert "DO NOTHING" in endpoint_upsert_sql
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_upsert_edge_idempotent
+# ---------------------------------------------------------------------------
+
+async def test_analyze_upsert_edge_idempotent(tmp_path):
+    svc_dir = tmp_path / "order-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service code")
+
+    svc_row = _Row({"id": 2})
+    ep_row = _Row({"id": 5, "method": "GET", "path": "/users/{id}", "service_id": 10})
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=svc_row)
+    conn.fetch = AsyncMock(return_value=[ep_row])
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_http_calls",
+               return_value=[{"url": "http://user-service/users/123"}]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp1 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+            resp2 = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp1.status_code == 200
+    assert resp2.status_code == 200
+    assert resp1.json()["edges"] == 1
+    assert resp2.json()["edges"] == 1
+    # Edge upsert SQL uses ON CONFLICT DO UPDATE refreshing last_seen_at.
+    # conn.execute is also called by set_rls_context (set_config calls), so search
+    # through all execute calls to find the one that targets consumer_edges.
+    edge_sql_calls = [
+        c[0][0] for c in conn.execute.call_args_list if "consumer_edges" in c[0][0]
+    ]
+    assert len(edge_sql_calls) >= 1
+    edge_sql = edge_sql_calls[0]
+    assert "ON CONFLICT" in edge_sql
+    assert "DO UPDATE" in edge_sql
+    assert "last_seen_at" in edge_sql

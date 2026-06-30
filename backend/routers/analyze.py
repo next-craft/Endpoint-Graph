@@ -1,4 +1,5 @@
 import os
+import re
 import glob
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,6 +12,28 @@ from analysis.code_parser import extract_route_decorators, extract_http_calls
 from analysis.url_matcher import match_url_to_endpoint
 
 router = APIRouter()
+
+
+def repo_id_from_url(repo_url: str) -> str:
+    """Return 'owner/name' from any GitHub URL form.
+
+    Accepts:
+      https://github.com/owner/name
+      https://github.com/owner/name.git
+      github.com/owner/name
+
+    Raises ValueError if the URL is not a github.com URL or cannot be parsed.
+    """
+    url = repo_url.strip().rstrip('/')
+    url = re.sub(r'^https?://', '', url)
+    if not url.startswith('github.com/'):
+        raise ValueError(f"Cannot derive repo_id from URL: {repo_url!r}")
+    url = url.removeprefix('github.com/')
+    url = url.removesuffix('.git')
+    parts = url.split('/')
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        raise ValueError(f"Cannot derive repo_id from URL: {repo_url!r}")
+    return f"{parts[0]}/{parts[1]}"
 
 
 def _is_service_folder(folder_path: str) -> bool:
@@ -42,6 +65,11 @@ async def analyze(
     token: str = Depends(get_github_token),
     user_id: str = Depends(get_current_user_id),
 ):
+    try:
+        repo_id = repo_id_from_url(request.repo_url)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid repo URL")
+
     services_count = 0
     endpoints_count = 0
     edges_count = 0
@@ -82,31 +110,34 @@ async def analyze(
                                 })
 
                     row = await conn.fetchrow(
-                        "SELECT id FROM services WHERE name = $1 AND repo_url = $2",
-                        service_name, request.repo_url
+                        """INSERT INTO services (name, language, repo_url, user_id, repo_id, last_analyzed_at)
+                           VALUES ($1, $2, $3, $4, $5, NOW())
+                           ON CONFLICT (user_id, repo_id, name)
+                           DO UPDATE SET last_analyzed_at = NOW(), language = EXCLUDED.language
+                           RETURNING id""",
+                        service_name, "python", request.repo_url, user_id, repo_id,
                     )
-                    if row:
-                        service_id = row["id"]
-                    else:
-                        service_id = await conn.fetchval(
-                            "INSERT INTO services (name, language, repo_url) VALUES ($1, $2, $3) RETURNING id",
-                            service_name, "python", request.repo_url
-                        )
-                        services_count += 1
+                    service_id = row["id"]
+                    services_count += 1
 
                     service_records.append((service_name, service_id, folder_path))
 
                     for endpoint in discovered:
                         ep_row = await conn.fetchrow(
-                            "SELECT id FROM endpoints WHERE service_id = $1 AND method = $2 AND path = $3",
-                            service_id, endpoint["method"], endpoint["path"]
+                            """INSERT INTO endpoints (service_id, method, path, spec_source)
+                               VALUES ($1, $2, $3, $4)
+                               ON CONFLICT (service_id, method, path)
+                               DO NOTHING
+                               RETURNING id""",
+                            service_id, endpoint["method"], endpoint["path"], endpoint["spec_source"],
                         )
-                        if not ep_row:
-                            await conn.execute(
-                                "INSERT INTO endpoints (service_id, method, path, spec_source) VALUES ($1, $2, $3, $4)",
-                                service_id, endpoint["method"], endpoint["path"], endpoint["spec_source"]
+                        if ep_row is None:
+                            # DO NOTHING returns no row — fetch the existing id
+                            ep_row = await conn.fetchrow(
+                                "SELECT id FROM endpoints WHERE service_id=$1 AND method=$2 AND path=$3",
+                                service_id, endpoint["method"], endpoint["path"],
                             )
-                            endpoints_count += 1
+                        endpoints_count += 1
 
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -145,20 +176,15 @@ async def analyze(
                             endpoint_id = matched_endpoint["id"]
                             if matched_endpoint["service_id"] == service_id:
                                 continue
-                            existing_edge = await conn.fetchrow(
-                                "SELECT id FROM consumer_edges"
-                                " WHERE caller_service_id = $1 AND endpoint_id = $2",
-                                service_id, endpoint_id
+                            await conn.execute(
+                                """INSERT INTO consumer_edges
+                                       (caller_service_id, endpoint_id, last_seen_at, call_count, source)
+                                   VALUES ($1, $2, NOW(), 1, $3)
+                                   ON CONFLICT (caller_service_id, endpoint_id)
+                                   DO UPDATE SET last_seen_at = NOW(), source = EXCLUDED.source""",
+                                service_id, endpoint_id, 'static',
                             )
-                            await conn.execute("""
-                                INSERT INTO consumer_edges
-                                    (caller_service_id, endpoint_id, last_seen_at, call_count, source)
-                                VALUES ($1, $2, NOW(), 1, 'static')
-                                ON CONFLICT (caller_service_id, endpoint_id)
-                                DO UPDATE SET last_seen_at = NOW(), source = 'static'
-                            """, service_id, endpoint_id)
-                            if not existing_edge:
-                                edges_count += 1
+                            edges_count += 1
 
     except ValueError:
         raise HTTPException(
