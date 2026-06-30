@@ -69,7 +69,9 @@ specs/
 ├── v2-06-repos-route.md       ← GET /repos — GitHub repo list with tracked status
 ├── v2-07-repos-page.md        ← frontend /repos page — Track / Re-analyze buttons
 ├── v2-08-scoped-graph.md      ← GET /graph?repo_id=... scoped per repo + user; persist on refresh
-└── v2-09-delete-service.md    ← DELETE /services/{id} — untrack a repo
+├── v2-09-delete-service.md    ← DELETE /services/{id} — untrack a repo
+├── v2-10-template-literals.md ← extract URL paths from JS template literals and Python f-strings
+└── v2-11-endpoint-nodes.md    ← endpoint-level graph nodes with function names; 3-level React Flow layout
 ```
 
 ### Command files
@@ -264,12 +266,14 @@ CREATE TABLE public.services (
 
 ```sql
 CREATE TABLE public.endpoints (
-  id           SERIAL PRIMARY KEY,
-  service_id   INT NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
-  method       VARCHAR(10) NOT NULL,    -- GET | POST | PUT | DELETE
-  path         VARCHAR(255) NOT NULL,   -- /users/{id}
-  spec_source  VARCHAR(50),            -- openapi | decorator | decorator_js | nextjs_route
-  created_at   TIMESTAMP DEFAULT NOW(),
+  id            SERIAL PRIMARY KEY,
+  service_id    INT NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
+  method        VARCHAR(10) NOT NULL,    -- GET | POST | PUT | DELETE
+  path          VARCHAR(255) NOT NULL,   -- /users/{id}
+  spec_source   VARCHAR(50),            -- openapi | decorator | decorator_js | nextjs_route
+  file_path     VARCHAR(500),           -- relative path within service root, e.g. routers/users.py
+  function_name VARCHAR(255),           -- handler function name, e.g. get_user / GET (Next.js)
+  created_at    TIMESTAMP DEFAULT NOW(),
   UNIQUE (service_id, method, path)    -- re-analysis upserts, never duplicates
 );
 ```
@@ -278,13 +282,15 @@ CREATE TABLE public.endpoints (
 
 ```sql
 CREATE TABLE public.consumer_edges (
-  id                 SERIAL PRIMARY KEY,
-  caller_service_id  INT NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
-  endpoint_id        INT NOT NULL REFERENCES public.endpoints(id) ON DELETE CASCADE,
-  last_seen_at       TIMESTAMP DEFAULT NOW(),
-  call_count         INT DEFAULT 0,
-  source             VARCHAR(20) NOT NULL,  -- static | logs
-  created_at         TIMESTAMP DEFAULT NOW(),
+  id                   SERIAL PRIMARY KEY,
+  caller_service_id    INT NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
+  endpoint_id          INT NOT NULL REFERENCES public.endpoints(id) ON DELETE CASCADE,
+  last_seen_at         TIMESTAMP DEFAULT NOW(),
+  call_count           INT DEFAULT 0,
+  source               VARCHAR(20) NOT NULL,   -- static | logs
+  caller_file_path     VARCHAR(500),           -- relative path within caller service, e.g. lib/api.js
+  caller_function_name VARCHAR(255),           -- enclosing function name, e.g. fetchUser
+  created_at           TIMESTAMP DEFAULT NOW(),
   UNIQUE(caller_service_id, endpoint_id)
 );
 ```
@@ -322,9 +328,13 @@ CREATE POLICY "users see own edges"
 | `services.last_analyzed_at` | Shows when a repo was last analyzed in the repo browser |
 | `services UNIQUE(user_id, repo_id, name)` | Re-analysis upserts rows instead of creating duplicates |
 | `endpoints UNIQUE(service_id, method, path)` | Same — re-analysis is idempotent |
+| `endpoints.file_path` | Which file this endpoint lives in — drives the file group node in the graph |
+| `endpoints.function_name` | The handler function name shown as the node label (e.g. `get_user`, `GET`) |
 | `consumer_edges.last_seen_at` | Dependency seen 8 months ago vs 2 minutes ago = very different risk |
 | `consumer_edges.call_count` | 1 call/day vs 10,000/min = very different blast radius |
 | `consumer_edges.source` | `static` = found in code. `logs` = confirmed live traffic (v3 only) |
+| `consumer_edges.caller_file_path` | Which file the HTTP call was found in — drives the caller file group node |
+| `consumer_edges.caller_function_name` | Which function made the call — shown as the caller leaf node label |
 | `endpoints.spec_source` | Tracks how the endpoint was discovered — affects confidence shown in UI |
 
 ### spec_source values
@@ -673,11 +683,11 @@ All routes require both headers: `X-GitHub-Token` and `Authorization: Bearer <su
 |---|---|---|---|
 | POST | `/analyze` | `{repo_url: string}` | `{status: "ok", services: int, endpoints: int, edges: int}` |
 | GET | `/graph` | `?repo_id=owner/name` | `{nodes: [...], edges: [...]}` |
-| GET | `/repos` | — | `[{name, full_name, private, updated_at, tracked, last_analyzed_at}]` |
+| GET | `/repos` | — | `[{name, full_name, private, updated_at, tracked, last_analyzed_at, service_id}]` |
 | GET | `/services` | — | `[{id, name, language, repo_url, repo_id, last_analyzed_at}]` |
 | DELETE | `/services/{id}` | — | `{status: "deleted"}` |
 | GET | `/endpoints` | `?service_id=1` (optional) | `[{id, service_id, method, path, spec_source}]` |
-| GET | `/endpoints/{id}/impact-analysis` | — | `[{service_name, call_count, last_seen_at, source}]` |
+| GET | `/endpoints/{id}/impact-analysis` | — | `[{service_name, caller_function_name, caller_file_path, call_count, last_seen_at, source}]` |
 
 ### Pydantic models
 
@@ -710,6 +720,7 @@ class RepoOut(BaseModel):
     updated_at: str
     tracked: bool
     last_analyzed_at: datetime | None
+    service_id: int | None      # DB id of the tracked service; None when tracked=false
 
 class EndpointOut(BaseModel):
     id: int
@@ -717,22 +728,31 @@ class EndpointOut(BaseModel):
     method: str
     path: str
     spec_source: str | None
+    file_path: str | None
+    function_name: str | None
 
 class ConsumerOut(BaseModel):
     service_name: str
+    caller_function_name: str | None
+    caller_file_path: str | None
     call_count: int
     last_seen_at: datetime
     source: str
 
 class GraphNode(BaseModel):
-    id: str
-    name: str
+    id: str              # "ep:{endpoint_id}" or "caller:{service_id}:{file_path}:{fn_name}"
+    node_type: str       # "endpoint" | "caller"
+    label: str           # primary display label (function_name, or method+path if no fn name)
+    function_name: str | None
+    method: str | None   # only on endpoint nodes
+    path: str | None     # only on endpoint nodes
+    file_path: str | None
+    service_name: str    # outer container label
+    service_id: int
 
 class GraphEdge(BaseModel):
-    source: str
-    target: str
-    endpoint_path: str
-    endpoint_method: str
+    source: str          # caller node id
+    target: str          # endpoint node id
     call_count: int
     last_seen_at: datetime
 
@@ -753,32 +773,45 @@ ON CONFLICT (user_id, repo_id, name)
 DO UPDATE SET last_analyzed_at = NOW(), language = EXCLUDED.language
 RETURNING id;
 
--- Upsert endpoint (re-analysis is idempotent)
-INSERT INTO endpoints (service_id, method, path, spec_source)
-VALUES ($1, $2, $3, $4)
+-- Upsert endpoint (re-analysis updates file_path and function_name; never duplicates)
+INSERT INTO endpoints (service_id, method, path, spec_source, file_path, function_name)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (service_id, method, path)
-DO NOTHING
+DO UPDATE SET file_path = EXCLUDED.file_path, function_name = EXCLUDED.function_name
 RETURNING id;
 
--- Upsert edge (on re-analysis, update timestamp)
-INSERT INTO consumer_edges (caller_service_id, endpoint_id, last_seen_at, call_count, source)
-VALUES ($1, $2, NOW(), 1, $3)
+-- Upsert edge (on re-analysis, update timestamp and caller context)
+INSERT INTO consumer_edges
+  (caller_service_id, endpoint_id, last_seen_at, call_count, source, caller_file_path, caller_function_name)
+VALUES ($1, $2, NOW(), 1, $3, $4, $5)
 ON CONFLICT (caller_service_id, endpoint_id)
-DO UPDATE SET last_seen_at = NOW(), source = EXCLUDED.source;
+DO UPDATE SET last_seen_at = NOW(), source = EXCLUDED.source,
+              caller_file_path = EXCLUDED.caller_file_path,
+              caller_function_name = EXCLUDED.caller_function_name;
 
--- Graph: nodes + edges for one repo, one user (RLS also enforces user filter)
+-- Graph: endpoint-level nodes + edges for one repo (RLS also enforces user filter)
+-- Returns one row per consumer_edge — graph.py assembles nodes from the rows
 SELECT
-  s.id, s.name,
-  ce.caller_service_id, ce.endpoint_id,
-  e.path, e.method,
+  e.id               AS endpoint_id,
+  e.service_id       AS endpoint_service_id,
+  es.name            AS endpoint_service_name,
+  e.file_path        AS endpoint_file_path,
+  e.function_name    AS endpoint_function_name,
+  e.method, e.path,
+  ce.caller_service_id,
+  cs.name            AS caller_service_name,
+  ce.caller_file_path,
+  ce.caller_function_name,
   ce.call_count, ce.last_seen_at
 FROM consumer_edges ce
-JOIN services s ON s.id = ce.caller_service_id
-JOIN endpoints e ON e.id = ce.endpoint_id
-WHERE s.repo_id = $1;
+JOIN services cs ON cs.id = ce.caller_service_id
+JOIN endpoints e  ON e.id  = ce.endpoint_id
+JOIN services es  ON es.id = e.service_id
+WHERE cs.repo_id = $1;
 
--- Impact analysis: who calls endpoint X
-SELECT s.name AS service_name, ce.call_count, ce.last_seen_at, ce.source
+-- Impact analysis: who calls endpoint X (with file + function detail)
+SELECT s.name AS service_name, ce.caller_function_name, ce.caller_file_path,
+       ce.call_count, ce.last_seen_at, ce.source
 FROM consumer_edges ce
 JOIN services s ON s.id = ce.caller_service_id
 WHERE ce.endpoint_id = $1
@@ -1021,21 +1054,32 @@ Users can only track repos they own (what the GitHub token can see). This remove
 ### No depth limit on service discovery
 `IGNORED_DIRS` is what bounds the traversal, not an arbitrary depth number. A well-structured monorepo at depth 5 should be fully discovered.
 
+### Endpoint-level graph nodes (not service-level or file-level)
+The graph leaf nodes are individual endpoint handler functions (provider side) and individual caller functions (caller side). Files are intermediate group containers. Services are outer containers. Three levels of nesting in React Flow: service group → file group → leaf node.
+
+This was chosen over service-level nodes because a service blob is useless for monolithic repos — one service can have dozens of endpoints and `routers/users.py` exposes `get_user`, `list_users`, and `update_user` as three separate nodes, each with its own inbound edges showing exactly who calls it. A file-level node without function granularity would still conflate those into one blob.
+
+Node id scheme: `"ep:{endpoint_id}"` for provider endpoint nodes, `"caller:{caller_service_id}:{caller_file_path}:{caller_function_name}"` for caller function nodes. Edges are always caller → endpoint.
+
+The `function_name` column on `endpoints` and `caller_function_name` column on `consumer_edges` are what make this work — they are populated by tree-sitter during analysis by walking the AST to find the enclosing function name.
+
 ---
 
 ## V2 scope
 
 ### In v2
 - [x] V1 fully shipped (login, analyze, graph, impact panel, search)
-- [ ] DB migration: add `user_id`, `repo_id`, `last_analyzed_at` to services; unique constraints; RLS on all tables
-- [ ] Backend: verify Supabase ES256 JWT, extract user_id from sub claim, set RLS context per DB transaction
-- [ ] Upsert services + endpoints on re-analysis (no duplicate rows)
-- [ ] Recursive service discovery — full depth, `IGNORED_DIRS` only
-- [ ] JS/TS parser — extend `code_parser.py` for `.js`, `.jsx`, `.ts`, `.tsx`
-- [ ] `GET /repos` — proxy GitHub repo list, annotate with `tracked` + `last_analyzed_at`
-- [ ] Frontend `/repos` page — repo browser with Track / Re-analyze buttons
+- [x] DB migration: add `user_id`, `repo_id`, `last_analyzed_at` to services; unique constraints; RLS on all tables
+- [x] Backend: verify Supabase ES256 JWT, extract user_id from sub claim, set RLS context per DB transaction
+- [x] Upsert services + endpoints on re-analysis (no duplicate rows)
+- [x] Recursive service discovery — full depth, `IGNORED_DIRS` only
+- [x] JS/TS parser — extend `code_parser.py` for `.js`, `.jsx`, `.ts`, `.tsx`
+- [ ] `GET /repos` — proxy GitHub repo list, annotate with `tracked` + `last_analyzed_at` + `service_id`
+- [ ] Frontend `/repos` page — repo browser with Track / Re-analyze / Untrack buttons
 - [ ] `GET /graph?repo_id=...` scoped per repo + user; graph persists on page refresh
 - [ ] `DELETE /services/{id}` — untrack a repo
+- [ ] Template literal and f-string URL detection — extract paths from dynamic host + static path patterns
+- [ ] Endpoint-level graph nodes — function_name + file_path columns, 3-level React Flow layout (service → file → endpoint/caller)
 
 ### Not in v2 — do not implement
 - [ ] Field-level impact analysis (v3)
