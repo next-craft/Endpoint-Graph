@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import GraphPage from '@/app/graph/page'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import GraphPage from '@/app/graph/GraphPageInner'
 
 jest.mock('@/lib/supabase', () => ({
   supabase: {
@@ -60,23 +60,20 @@ jest.mock('next/dynamic', () => (_fn) => {
   return require('@/components/DependencyGraph').default
 })
 
-jest.mock('@/components/RepoInput', () => ({
-  __esModule: true,
-  default: function MockRepoInput({ onAnalysisComplete }) {
-    return <button onClick={onAnalysisComplete}>Analyze</button>
-  },
+const mockUseSearchParams = jest.fn(() => new URLSearchParams('repo=iamaryan07/sample-services'))
+jest.mock('next/navigation', () => ({
+  useSearchParams: () => mockUseSearchParams(),
 }))
 
 jest.mock('@/lib/api', () => ({
-  triggerAnalysis: jest.fn(),
   fetchGraph: jest.fn(),
 }))
 
-const { triggerAnalysis, fetchGraph } = require('@/lib/api')
+const { fetchGraph } = require('@/lib/api')
 
 beforeEach(() => {
   jest.clearAllMocks()
-  triggerAnalysis.mockResolvedValue({ status: 'ok' })
+  mockUseSearchParams.mockReturnValue(new URLSearchParams('repo=iamaryan07/sample-services'))
 })
 
 test('test_graph_page_transforms_fetchGraph_response', async () => {
@@ -99,11 +96,11 @@ test('test_graph_page_transforms_fetchGraph_response', async () => {
 
   render(<GraphPage />)
 
-  fireEvent.click(screen.getByText('Analyze'))
-
   await waitFor(() => {
     expect(screen.getByText('order-service')).toBeInTheDocument()
   })
+
+  expect(fetchGraph).toHaveBeenCalledWith('iamaryan07/sample-services')
 
   const edge = screen.getByTestId('graph-edge')
   expect(edge).toHaveAttribute('data-edge-id', '1-endpoint-5-GET-/users/{id}')
@@ -113,8 +110,6 @@ test('test_graph_page_shows_error_when_fetchGraph_fails', async () => {
   fetchGraph.mockRejectedValue(new Error('graph fetch failed'))
 
   render(<GraphPage />)
-
-  fireEvent.click(screen.getByText('Analyze'))
 
   await waitFor(() => {
     expect(screen.getByText('graph fetch failed')).toBeInTheDocument()
@@ -131,7 +126,6 @@ test('test_handleNodeClick_ignores_service_nodes', async () => {
   })
 
   render(<GraphPage />)
-  fireEvent.click(screen.getByText('Analyze'))
 
   await waitFor(() => {
     expect(screen.getByText('order-service')).toBeInTheDocument()
@@ -152,7 +146,6 @@ test('test_handleNodeClick_sets_state_for_endpoint_nodes', async () => {
   })
 
   render(<GraphPage />)
-  fireEvent.click(screen.getByText('Analyze'))
 
   await waitFor(() => {
     expect(screen.getByText('GET /users/{id}')).toBeInTheDocument()
@@ -169,4 +162,16 @@ test('test_handleNodeClick_sets_state_for_endpoint_nodes', async () => {
     'data-endpoint-label',
     'GET /users/{id}'
   )
+})
+
+test('test_graph_page_shows_empty_state_when_no_repo_param', async () => {
+  mockUseSearchParams.mockReturnValue(new URLSearchParams())
+
+  render(<GraphPage />)
+
+  await waitFor(() => {
+    expect(screen.getByText('No repo selected — go to /repos and track one.')).toBeInTheDocument()
+  })
+
+  expect(fetchGraph).not.toHaveBeenCalled()
 })

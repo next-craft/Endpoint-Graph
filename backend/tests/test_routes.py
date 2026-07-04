@@ -548,7 +548,9 @@ async def test_get_graph_returns_nodes_and_edges():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
 
     assert resp.status_code == 200
     data = resp.json()
@@ -569,7 +571,7 @@ async def test_get_graph_empty_db():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/empty-repo", headers=HEADERS)
 
     assert resp.status_code == 200
     data = resp.json()
@@ -579,9 +581,34 @@ async def test_get_graph_empty_db():
 
 async def test_get_graph_requires_token():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/graph")
+        resp = await client.get("/graph?repo_id=iamaryan07/sample-services")
 
     assert resp.status_code == 422
+
+
+async def test_get_graph_requires_repo_id():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/graph", headers=HEADERS)
+
+    assert resp.status_code == 422
+
+
+async def test_get_graph_scopes_queries_by_repo_id():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(side_effect=[[], [], []])
+    pool = _make_pool(conn)
+
+    with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
+
+    assert resp.status_code == 200
+    assert conn.fetch.call_count == 3
+    for call in conn.fetch.call_args_list:
+        assert call.args[-1] == "iamaryan07/sample-services"
 
 
 async def test_get_graph_includes_endpoint_nodes():
@@ -604,7 +631,9 @@ async def test_get_graph_includes_endpoint_nodes():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
 
     data = resp.json()
     node_ids = [n["id"] for n in data["nodes"]]

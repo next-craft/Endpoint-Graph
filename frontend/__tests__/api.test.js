@@ -63,19 +63,6 @@ test('test_fetch_graph_sends_correct_request', async () => {
   )
 })
 
-test('test_fetch_graph_sends_bare_url_when_no_repo_id', async () => {
-  await fetchGraph()
-
-  expect(global.fetch).toHaveBeenCalledWith(
-    'http://localhost:8000/graph',
-    expect.objectContaining({
-      headers: expect.objectContaining({
-        'X-GitHub-Token': 'test-token',
-        'Authorization': 'Bearer test-jwt',
-      }),
-    })
-  )
-})
 
 test('test_fetch_services_sends_correct_request', async () => {
   await fetchServices()

@@ -304,7 +304,7 @@ async def test_impact_analysis_rejects_missing_github_token():
 
 async def test_graph_rejects_missing_github_token():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        resp = await c.get("/graph", headers={"Authorization": "Bearer x"})
+        resp = await c.get("/graph?repo_id=owner/repo", headers={"Authorization": "Bearer x"})
     assert resp.status_code == 422
 
 
@@ -397,7 +397,7 @@ async def test_graph_invokes_set_rls_context():
          patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            resp = await c.get("/graph", headers={"X-GitHub-Token": "tok"})
+            resp = await c.get("/graph?repo_id=owner/repo", headers={"X-GitHub-Token": "tok"})
 
     assert resp.status_code == 200
     spy.assert_called_once()

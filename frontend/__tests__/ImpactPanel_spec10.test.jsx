@@ -10,7 +10,7 @@
 import '@testing-library/jest-dom'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import ImpactPanel from '@/components/ImpactPanel'
-import GraphPage from '@/app/graph/page'
+import GraphPage from '@/app/graph/GraphPageInner'
 
 // ─── Module mocks (hoisted by Jest) ──────────────────────────────────────────
 
@@ -18,6 +18,11 @@ jest.mock('@/lib/api', () => ({
   fetchImpactAnalysis: jest.fn(),
   fetchGraph: jest.fn(),
   triggerAnalysis: jest.fn(),
+}))
+
+const mockUseSearchParams = jest.fn(() => new URLSearchParams('repo=iamaryan07/sample-services'))
+jest.mock('next/navigation', () => ({
+  useSearchParams: () => mockUseSearchParams(),
 }))
 
 jest.mock('@/lib/supabase', () => ({
@@ -70,6 +75,7 @@ const { fetchImpactAnalysis, fetchGraph, triggerAnalysis } = require('@/lib/api'
 beforeEach(() => {
   jest.clearAllMocks()
   process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8000'
+  mockUseSearchParams.mockReturnValue(new URLSearchParams('repo=iamaryan07/sample-services'))
   // Default: analysis succeeds so GraphPage integration tests can load the graph
   triggerAnalysis.mockResolvedValue({ status: 'ok' })
 })
@@ -239,8 +245,7 @@ test('graph_clicking_endpoint_node_shows_impact_panel', async () => {
 
   render(<GraphPage />)
 
-  fireEvent.click(screen.getByText('Analyze'))
-  // Wait for DependencyGraph to render after fetchGraph resolves
+  // Wait for DependencyGraph to render after fetchGraph resolves on mount
   await waitFor(() => screen.getByText('DELETE /items/{id}'))
 
   fireEvent.click(screen.getByText('DELETE /items/{id}'))
@@ -265,7 +270,6 @@ test('graph_clicking_service_node_does_not_show_impact_panel', async () => {
 
   render(<GraphPage />)
 
-  fireEvent.click(screen.getByText('Analyze'))
   await waitFor(() => screen.getByText('order-service'))
 
   fireEvent.click(screen.getByText('order-service'))
@@ -287,7 +291,6 @@ test('graph_impact_panel_closes_when_close_button_clicked', async () => {
 
   render(<GraphPage />)
 
-  fireEvent.click(screen.getByText('Analyze'))
   await waitFor(() => screen.getByText('GET /users/{id}'))
 
   // Open the panel
