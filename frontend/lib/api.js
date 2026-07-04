@@ -33,11 +33,9 @@ export async function triggerAnalysis(repoUrl) {
   return res.json()
 }
 
-export async function fetchGraph(repoId = null) {
+export async function fetchGraph(repoId) {
   const headers = await getAuthHeaders()
-  const url = repoId
-    ? `${process.env.NEXT_PUBLIC_API_URL}/graph?repo_id=${encodeURIComponent(repoId)}`
-    : `${process.env.NEXT_PUBLIC_API_URL}/graph`
+  const url = `${process.env.NEXT_PUBLIC_API_URL}/graph?repo_id=${encodeURIComponent(repoId)}`
   const res = await fetch(url, { headers })
   if (!res.ok) throw new Error(await extractError(res))
   return res.json()

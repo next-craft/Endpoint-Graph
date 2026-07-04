@@ -65,7 +65,7 @@ async def test_graph_service_nodes_have_plain_string_id():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     assert resp.status_code == 200
     data = resp.json()
@@ -97,7 +97,7 @@ async def test_graph_endpoint_nodes_use_endpoint_prefix():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     node_ids = [n["id"] for n in data["nodes"]]
@@ -129,7 +129,7 @@ async def test_graph_endpoint_node_name_is_method_space_path():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     endpoint_node = next(n for n in data["nodes"] if n["id"] == "endpoint-4")
@@ -155,7 +155,7 @@ async def test_graph_no_endpoint_nodes_when_no_consumer_edges():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     assert resp.status_code == 200
@@ -190,7 +190,7 @@ async def test_graph_edge_target_has_endpoint_prefix():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     assert len(data["edges"]) == 1
@@ -227,7 +227,7 @@ async def test_graph_edge_source_is_caller_service_id_string():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     assert data["edges"][0]["source"] == "3"    # caller
@@ -273,7 +273,7 @@ async def test_graph_multiple_services_and_endpoint_nodes():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.get("/graph", headers=HEADERS)
+            resp = await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     data = resp.json()
     assert resp.status_code == 200
@@ -299,6 +299,6 @@ async def test_graph_executes_exactly_three_db_queries():
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            await client.get("/graph", headers=HEADERS)
+            await client.get("/graph?repo_id=owner/repo", headers=HEADERS)
 
     assert conn.fetch.call_count == 3
