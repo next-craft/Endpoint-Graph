@@ -1,7 +1,7 @@
 import pytest
 import jwt
 from datetime import datetime, timezone
-from unittest.mock import patch, AsyncMock, MagicMock
+from unittest.mock import patch, AsyncMock, MagicMock, call
 from contextlib import asynccontextmanager
 from httpx import AsyncClient, ASGITransport
 from main import app
@@ -417,6 +417,114 @@ async def test_get_services_requires_token():
         resp = await client.get("/services")
 
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# DELETE /services/{id}
+# ---------------------------------------------------------------------------
+
+async def test_delete_service_success():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.services.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.delete("/services/1", headers=HEADERS)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "deleted"}
+    # conn.execute is also used by set_rls_context, so check the delete call
+    # specifically rather than asserting a single total call count.
+    delete_calls = [c for c in conn.execute.call_args_list
+                    if c.args[0] == "DELETE FROM services WHERE id = $1"]
+    assert delete_calls == [call("DELETE FROM services WHERE id = $1", 1)]
+
+
+async def test_delete_service_not_found():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.services.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.delete("/services/999", headers=HEADERS)
+
+    assert resp.status_code == 404
+    delete_calls = [c for c in conn.execute.call_args_list
+                    if c.args[0] == "DELETE FROM services WHERE id = $1"]
+    assert delete_calls == []
+
+
+async def test_delete_service_wrong_user():
+    # RLS/the explicit user_id filter excludes a service owned by another user —
+    # fetchrow finds no row, same as a genuinely missing id.
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=None)
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.services.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.delete("/services/1", headers=HEADERS)
+
+    assert resp.status_code == 404
+    delete_calls = [c for c in conn.execute.call_args_list
+                    if c.args[0] == "DELETE FROM services WHERE id = $1"]
+    assert delete_calls == []
+
+
+async def test_delete_service_requires_github_token():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.delete("/services/1", headers={"Authorization": "Bearer test-jwt"})
+
+    assert resp.status_code == 422
+
+
+async def test_delete_service_requires_auth_header(real_auth):
+    # real_auth pops the autouse get_current_user_id override so the missing
+    # Authorization header actually triggers FastAPI's required-header validation.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.delete("/services/1", headers={"X-GitHub-Token": "test-token"})
+
+    assert resp.status_code == 422
+
+
+async def test_delete_service_checks_ownership_before_delete():
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=_Row({"id": 1}))
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.services.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.delete("/services/1", headers=HEADERS)
+
+    assert resp.status_code == 200
+    assert conn.fetchrow.call_args.args == (
+        "SELECT id FROM services WHERE id = $1 AND user_id = $2",
+        1,
+        "test-user-id",
+    )
+
+    # conn.mock_calls records every call to conn.execute/conn.fetchrow in order,
+    # including the two set_rls_context execute() calls that legitimately run
+    # first. Find the fetchrow call and the specific DELETE execute call and
+    # confirm the ownership check precedes the delete.
+    fetchrow_index = next(
+        i for i, c in enumerate(conn.mock_calls) if c[0] == "fetchrow"
+    )
+    delete_index = next(
+        i for i, c in enumerate(conn.mock_calls)
+        if c[0] == "execute" and c.args and c.args[0] == "DELETE FROM services WHERE id = $1"
+    )
+    assert fetchrow_index < delete_index
 
 
 # ---------------------------------------------------------------------------
