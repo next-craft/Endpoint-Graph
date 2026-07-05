@@ -1,16 +1,16 @@
 import { filterGraph } from './graphFilter'
 
 // ── fixtures ────────────────────────────────────────────────────────────────
-const serviceA = { id: 'service-1', data: { label: 'user-service' } }
-const serviceB = { id: 'service-2', data: { label: 'order-service' } }
-const endpointGet  = { id: 'endpoint-1', data: { label: 'GET /users/{id}' } }
-const endpointPost = { id: 'endpoint-2', data: { label: 'POST /orders/create' } }
-const endpointPut  = { id: 'endpoint-3', data: { label: 'PUT /users/{id}/profile' } }
+const serviceA = { id: 'caller-1', node_type: 'caller', label: 'user-service' }
+const serviceB = { id: 'caller-2', node_type: 'caller', label: 'order-service' }
+const endpointGet  = { id: 'ep:1', node_type: 'endpoint', label: 'GET /users/{id}' }
+const endpointPost = { id: 'ep:2', node_type: 'endpoint', label: 'POST /orders/create' }
+const endpointPut  = { id: 'ep:3', node_type: 'endpoint', label: 'PUT /users/{id}/profile' }
 
-const edgeServiceToService = { id: 'e0', source: 'service-1', target: 'service-2' }
-const edgeToGetEndpoint    = { id: 'e1', source: 'service-1', target: 'endpoint-1' }
-const edgeToPostEndpoint   = { id: 'e2', source: 'service-2', target: 'endpoint-2' }
-const edgeEndpointToEndpoint = { id: 'e3', source: 'endpoint-1', target: 'endpoint-3' }
+const edgeServiceToService = { id: 'e0', source: 'caller-1', target: 'caller-2' }
+const edgeToGetEndpoint    = { id: 'e1', source: 'caller-1', target: 'ep:1' }
+const edgeToPostEndpoint   = { id: 'e2', source: 'caller-2', target: 'ep:2' }
+const edgeEndpointToEndpoint = { id: 'e3', source: 'ep:1', target: 'ep:3' }
 
 // ── case-insensitive matching ────────────────────────────────────────────────
 
@@ -87,11 +87,11 @@ test('empty_edges_array_returns_empty_edges_when_query_matches', () => {
   expect(visibleEdges).toHaveLength(0)
 })
 
-// ── multiple service nodes all pass through ──────────────────────────────────
+// ── multiple non-endpoint (caller) nodes all pass through ────────────────────
 
-test('all_service_nodes_pass_through_regardless_of_query', () => {
+test('all_non_endpoint_nodes_pass_through_regardless_of_query', () => {
   const nodes = [serviceA, serviceB, endpointGet, endpointPost]
-  // query "xyz" matches no endpoint labels; both service nodes still visible
+  // query "xyz" matches no endpoint labels; both caller nodes still visible
   const { visibleNodes } = filterGraph(nodes, [], 'xyz')
   expect(visibleNodes).toContain(serviceA)
   expect(visibleNodes).toContain(serviceB)
@@ -102,18 +102,18 @@ test('all_service_nodes_pass_through_regardless_of_query', () => {
 // ── non-endpoint node passes through even when its label doesn't match ───────
 
 test('non_endpoint_node_always_passes_through_independent_of_its_label', () => {
-  // 'user-service' label does not contain 'orders', but service node still passes
+  // 'user-service' label does not contain 'orders', but the caller node still passes
   const nodes = [serviceA, endpointPost]
   const { visibleNodes } = filterGraph(nodes, [], 'orders')
   expect(visibleNodes).toContain(serviceA)
 })
 
-// ── service-to-service edge survives when endpoints are filtered out ─────────
+// ── caller-to-caller edge survives when endpoints are filtered out ──────────
 
-test('service_to_service_edge_kept_when_query_filters_out_all_endpoints', () => {
+test('non_endpoint_to_non_endpoint_edge_kept_when_query_filters_out_all_endpoints', () => {
   const nodes = [serviceA, serviceB, endpointGet]
   const edges = [edgeServiceToService, edgeToGetEndpoint]
-  // "nomatch" filters out endpointGet; both service nodes remain → their edge stays
+  // "nomatch" filters out endpointGet; both caller nodes remain → their edge stays
   const { visibleEdges } = filterGraph(nodes, edges, 'nomatch')
   expect(visibleEdges).toContain(edgeServiceToService)
   expect(visibleEdges).not.toContain(edgeToGetEndpoint)
@@ -122,7 +122,7 @@ test('service_to_service_edge_kept_when_query_filters_out_all_endpoints', () => 
 // ── edge between two endpoints, both matching ────────────────────────────────
 
 test('edge_between_two_matching_endpoints_is_kept', () => {
-  // endpoint-1 (GET /users/{id}) and endpoint-3 (PUT /users/{id}/profile) both contain "users"
+  // ep:1 (GET /users/{id}) and ep:3 (PUT /users/{id}/profile) both contain "users"
   const nodes = [serviceA, endpointGet, endpointPut, endpointPost]
   const edges = [edgeEndpointToEndpoint, edgeToPostEndpoint]
   const { visibleEdges } = filterGraph(nodes, edges, 'users')
@@ -133,7 +133,7 @@ test('edge_between_two_matching_endpoints_is_kept', () => {
 // ── edge removed when source endpoint is filtered ────────────────────────────
 
 test('edge_removed_when_source_endpoint_does_not_match_query', () => {
-  // edgeEndpointToEndpoint: source=endpoint-1 (GET /users/{id}), target=endpoint-3 (PUT /users/{id}/profile)
+  // edgeEndpointToEndpoint: source=ep:1 (GET /users/{id}), target=ep:3 (PUT /users/{id}/profile)
   // query "orders" matches neither → edge must be removed
   const nodes = [serviceA, endpointGet, endpointPut]
   const edges = [edgeEndpointToEndpoint]

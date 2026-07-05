@@ -19,13 +19,13 @@ async def get_endpoints(
             await set_rls_context(conn, user_id)
             if service_id is not None:
                 rows = await conn.fetch(
-                    "SELECT id, service_id, method, path, spec_source"
+                    "SELECT id, service_id, method, path, spec_source, file_path, function_name"
                     " FROM endpoints WHERE service_id = $1 ORDER BY id",
                     service_id,
                 )
             else:
                 rows = await conn.fetch(
-                    "SELECT id, service_id, method, path, spec_source"
+                    "SELECT id, service_id, method, path, spec_source, file_path, function_name"
                     " FROM endpoints ORDER BY id"
                 )
     return [
@@ -35,6 +35,8 @@ async def get_endpoints(
             method=r["method"],
             path=r["path"],
             spec_source=r["spec_source"],
+            file_path=r["file_path"],
+            function_name=r["function_name"],
         )
         for r in rows
     ]
@@ -51,7 +53,8 @@ async def get_impact_analysis(
         async with conn.transaction():
             await set_rls_context(conn, user_id)
             rows = await conn.fetch(
-                "SELECT s.name AS service_name, ce.call_count, ce.last_seen_at, ce.source"
+                "SELECT s.name AS service_name, ce.caller_function_name, ce.caller_file_path,"
+                " ce.call_count, ce.last_seen_at, ce.source"
                 " FROM consumer_edges ce"
                 " JOIN services s ON s.id = ce.caller_service_id"
                 " WHERE ce.endpoint_id = $1"
@@ -61,6 +64,8 @@ async def get_impact_analysis(
     return [
         ConsumerOut(
             service_name=r["service_name"],
+            caller_function_name=r["caller_function_name"],
+            caller_file_path=r["caller_file_path"],
             call_count=r["call_count"],
             last_seen_at=r["last_seen_at"],
             source=r["source"],

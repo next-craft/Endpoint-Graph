@@ -14,29 +14,6 @@ const DependencyGraph = dynamic(
   { ssr: false }
 )
 
-const SERVICE_NODE_STYLE = {
-  background: '#14213d',
-  border: '1px solid #29447e',
-  borderColor: '#29447e',
-  color: '#e5e5e5',
-  borderRadius: '6px',
-  fontSize: '13px',
-  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-  padding: '8px 14px',
-  fontWeight: '500',
-}
-
-const ENDPOINT_NODE_STYLE = {
-  background: '#0c1425',
-  border: '1.5px solid #fca311',
-  borderColor: '#fca311',
-  color: '#e5e5e5',
-  borderRadius: '6px',
-  fontSize: '12px',
-  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
-  padding: '8px 14px',
-}
-
 function NetworkLogo() {
   return (
     <svg width="18" height="18" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -107,30 +84,8 @@ export default function GraphPageInner() {
       try {
         const graphData = await fetchGraph(repoId)
         if (cancelled) return
-        const serviceNodes = graphData.nodes.filter((n) => !n.id.startsWith('endpoint-'))
-        const endpointNodes = graphData.nodes.filter((n) => n.id.startsWith('endpoint-'))
-        const rfNodes = [
-          ...serviceNodes.map((node, i) => ({
-            id: node.id,
-            data: { label: node.name },
-            position: { x: i * 280, y: 60 },
-            style: SERVICE_NODE_STYLE,
-          })),
-          ...endpointNodes.map((node, i) => ({
-            id: node.id,
-            data: { label: node.name },
-            position: { x: i * 280, y: 320 },
-            style: ENDPOINT_NODE_STYLE,
-          })),
-        ]
-        const rfEdges = graphData.edges.map((edge) => ({
-          id: `${edge.source}-${edge.target}-${edge.endpoint_method}-${edge.endpoint_path}`,
-          source: edge.source,
-          target: edge.target,
-          label: `×${edge.call_count}`,
-        }))
-        setNodes(rfNodes)
-        setEdges(rfEdges)
+        setNodes(graphData.nodes)
+        setEdges(graphData.edges)
       } catch (err) {
         if (!cancelled) setGraphError(err.message)
       } finally {
@@ -146,9 +101,14 @@ export default function GraphPageInner() {
   }, [repoId])
 
   function handleNodeClick(event, node) {
-    if (!node.id.startsWith('endpoint-')) return
-    const endpointId = parseInt(node.id.replace('endpoint-', ''), 10)
-    setSelectedEndpoint({ id: endpointId, label: node.data.label })
+    if (node.data.node_type !== 'endpoint') return
+    const endpointId = parseInt(node.id.replace('ep:', ''), 10)
+    setSelectedEndpoint({
+      id: endpointId,
+      functionName: node.data.function_name,
+      method: node.data.method,
+      path: node.data.path,
+    })
   }
 
   async function handleLogout() {
@@ -228,7 +188,9 @@ export default function GraphPageInner() {
           {selectedEndpoint && (
             <ImpactPanel
               endpointId={selectedEndpoint.id}
-              endpointLabel={selectedEndpoint.label}
+              functionName={selectedEndpoint.functionName}
+              method={selectedEndpoint.method}
+              path={selectedEndpoint.path}
               onClose={() => setSelectedEndpoint(null)}
             />
           )}

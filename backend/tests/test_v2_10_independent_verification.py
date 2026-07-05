@@ -1,4 +1,5 @@
-# Independent cross-check for spec v2-10 (template literal & f-string URL detection).
+# Independent cross-check for spec v2-10 (template literal & f-string URL detection),
+# updated for spec v2-11's caller_function_name/file_path additions.
 #
 # These test cases were derived directly from .claude/specs/v2-10-template-literals.md
 # and first-principles reasoning about tree-sitter parsing of JS template_string nodes
@@ -18,14 +19,18 @@ def test_js_fetch_template_env_host_static_path(tmp_path):
     src = "const API_HOST = process.env.API_HOST;\nfetch(`${API_HOST}/users`);\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/users"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/users", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_template_dynamic_path_segment(tmp_path):
     src = "const id = 1;\nfetch(`/users/${id}`);\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/users/{param}"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_axios_get_template_literal(tmp_path):
@@ -33,7 +38,7 @@ def test_js_axios_get_template_literal(tmp_path):
     f = tmp_path / "client.js"
     f.write_text(src)
     result = extract_js_http_calls(str(f))
-    assert "/users/{param}" in result
+    assert "/users/{param}" in [c["url"] for c in result]
 
 
 def test_js_axios_post_template_literal_other_method(tmp_path):
@@ -42,7 +47,9 @@ def test_js_axios_post_template_literal_other_method(tmp_path):
     src = "const id = 1;\naxios.post(`http://svc/orders/${id}`);\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/orders/{param}"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/orders/{param}", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_template_multiple_substitutions(tmp_path):
@@ -53,7 +60,9 @@ def test_js_fetch_template_multiple_substitutions(tmp_path):
     )
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/users/{param}/orders/{param}"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/users/{param}/orders/{param}", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_template_no_substitutions(tmp_path):
@@ -62,7 +71,9 @@ def test_js_fetch_template_no_substitutions(tmp_path):
     src = "fetch(`/users`);\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/users"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/users", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_template_no_path_at_all_excluded(tmp_path):
@@ -80,7 +91,9 @@ def test_ts_fetch_template_literal_parity(tmp_path):
     src = "const id = 1;\nfetch(`http://svc/users/${id}`);\n"
     f = tmp_path / "client.ts"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["/users/{param}"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_plain_string_unaffected(tmp_path):
@@ -89,7 +102,9 @@ def test_js_fetch_plain_string_unaffected(tmp_path):
     src = "fetch('http://svc/users/1');\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == ["http://svc/users/1"]
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "http://svc/users/1", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_js_fetch_variable_url_still_skipped(tmp_path):
@@ -113,7 +128,7 @@ def test_requests_get_fstring_host(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == [{"url": "/users"}]
+    assert extract_http_calls(str(f)) == [{"url": "/users", "caller_function_name": None}]
 
 
 def test_requests_get_fstring_path_segment(tmp_path):
@@ -124,7 +139,7 @@ def test_requests_get_fstring_path_segment(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == [{"url": "/users/{param}"}]
+    assert extract_http_calls(str(f)) == [{"url": "/users/{param}", "caller_function_name": None}]
 
 
 def test_requests_get_fstring_multiple_substitutions(tmp_path):
@@ -136,7 +151,9 @@ def test_requests_get_fstring_multiple_substitutions(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == [{"url": "/users/{param}/orders/{param}"}]
+    assert extract_http_calls(str(f)) == [
+        {"url": "/users/{param}/orders/{param}", "caller_function_name": None}
+    ]
 
 
 def test_requests_get_fstring_no_path_skipped(tmp_path):
@@ -159,7 +176,7 @@ def test_httpx_get_fstring_reconstructed(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == [{"url": "/orders/{param}"}]
+    assert extract_http_calls(str(f)) == [{"url": "/orders/{param}", "caller_function_name": None}]
 
 
 def test_requests_get_plain_string_unaffected(tmp_path):
@@ -171,7 +188,7 @@ def test_requests_get_plain_string_unaffected(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == [{"url": "http://svc/users/1"}]
+    assert extract_http_calls(str(f)) == [{"url": "http://svc/users/1", "caller_function_name": None}]
 
 
 def test_requests_get_variable_url_still_skipped(tmp_path):

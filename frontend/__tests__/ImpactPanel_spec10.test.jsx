@@ -1,6 +1,9 @@
 /**
  * Spec-10 tests for ImpactPanel, GraphPage node-click wiring, and
  * fetchImpactAnalysis error propagation in api.js.
+ * Updated for spec v2-11: ImpactPanel takes method/path/functionName props
+ * (not endpointLabel), consumer rows render caller function/file context,
+ * and graph node ids follow the ep:/caller: scheme.
  *
  * ImpactPanel is intentionally NOT mocked here so that
  * - direct ImpactPanel tests render the real component, and
@@ -29,7 +32,7 @@ jest.mock('@/lib/supabase', () => ({
   supabase: {
     auth: {
       getSession: jest.fn().mockResolvedValue({
-        data: { session: { provider_token: 'test-token' } },
+        data: { session: { provider_token: 'test-token', access_token: 'test-jwt' } },
       }),
     },
   },
@@ -43,8 +46,9 @@ jest.mock('@/components/AuthGuard', () => ({
 }))
 
 /**
- * MockDependencyGraph renders each node as a clickable div that fires
- * onNodeClick with the full node object — same shape GraphPage builds.
+ * MockDependencyGraph renders each raw node's label as a clickable div and
+ * fires onNodeClick with an RF-shaped { id, data } node — the same shape
+ * the real DependencyGraph passes through from ReactFlow's onNodeClick.
  */
 jest.mock('@/components/DependencyGraph', () => ({
   __esModule: true,
@@ -55,9 +59,9 @@ jest.mock('@/components/DependencyGraph', () => ({
           <div
             key={n.id}
             data-testid={`node-${n.id}`}
-            onClick={(e) => onNodeClick && onNodeClick(e, n)}
+            onClick={(e) => onNodeClick && onNodeClick(e, { id: n.id, data: n })}
           >
-            {n.data.label}
+            {n.label}
           </div>
         ))}
       </div>
@@ -84,19 +88,20 @@ beforeEach(() => {
 
 const baseProps = {
   endpointId: 1,
-  endpointLabel: 'GET /users/{id}',
+  method: 'GET',
+  path: '/users/{id}',
+  functionName: 'get_user',
   onClose: jest.fn(),
 }
 
 /**
- * endpointLabel prop is rendered inside the h2 heading element.
+ * The path prop is rendered in the panel header.
  */
-test('impact_panel_renders_endpointLabel_in_h2_heading', async () => {
+test('impact_panel_renders_path_in_header', async () => {
   fetchImpactAnalysis.mockResolvedValue([])
-  render(<ImpactPanel {...baseProps} endpointLabel="POST /orders/create" />)
-  expect(
-    screen.getByRole('heading', { name: 'POST /orders/create' })
-  ).toBeInTheDocument()
+  render(<ImpactPanel {...baseProps} path="/orders/create" method="POST" />)
+  expect(screen.getByText('/orders/create')).toBeInTheDocument()
+  expect(screen.getByText('POST')).toBeInTheDocument()
 })
 
 /**
@@ -117,6 +122,8 @@ test('impact_panel_displays_call_count_in_consumer_row', async () => {
   fetchImpactAnalysis.mockResolvedValue([
     {
       service_name: 'billing-service',
+      caller_function_name: 'chargeCard',
+      caller_file_path: 'lib/billing.js',
       call_count: 999,
       last_seen_at: new Date().toISOString(),
       source: 'static',
@@ -194,23 +201,27 @@ test('impact_panel_loading_state_clears_after_fetch_resolves', async () => {
   await waitFor(() => {
     expect(screen.queryByText('Loading…')).not.toBeInTheDocument()
   })
-  expect(screen.getByText('No consumers found.')).toBeInTheDocument()
+  expect(screen.getByText('No consumers found')).toBeInTheDocument()
 })
 
 /**
- * When multiple consumers are returned, every service_name is rendered.
+ * When multiple consumers are returned, every consumer row renders its
+ * caller function/file context alongside the service name.
  */
 test('impact_panel_renders_every_consumer_when_multiple_returned', async () => {
   fetchImpactAnalysis.mockResolvedValue([
-    { service_name: 'order-service', call_count: 10, last_seen_at: new Date().toISOString(), source: 'static' },
-    { service_name: 'payment-service', call_count: 5, last_seen_at: new Date().toISOString(), source: 'logs' },
-    { service_name: 'search-service', call_count: 3, last_seen_at: new Date().toISOString(), source: 'static' },
+    { service_name: 'order-service', caller_function_name: 'fetchUser', caller_file_path: 'lib/api.js',
+      call_count: 10, last_seen_at: new Date().toISOString(), source: 'static' },
+    { service_name: 'payment-service', caller_function_name: 'getUser', caller_file_path: 'lib/client.js',
+      call_count: 5, last_seen_at: new Date().toISOString(), source: 'logs' },
+    { service_name: 'search-service', caller_function_name: 'lookupUser', caller_file_path: 'lib/search.js',
+      call_count: 3, last_seen_at: new Date().toISOString(), source: 'static' },
   ])
   render(<ImpactPanel {...baseProps} />)
   await waitFor(() => {
-    expect(screen.getByText('order-service')).toBeInTheDocument()
-    expect(screen.getByText('payment-service')).toBeInTheDocument()
-    expect(screen.getByText('search-service')).toBeInTheDocument()
+    expect(screen.getByText('fetchUser in lib/api.js (order-service)')).toBeInTheDocument()
+    expect(screen.getByText('getUser in lib/client.js (payment-service)')).toBeInTheDocument()
+    expect(screen.getByText('lookupUser in lib/search.js (search-service)')).toBeInTheDocument()
   })
 })
 
@@ -233,12 +244,16 @@ test('impact_panel_refetches_when_endpointId_prop_changes', async () => {
 // ─── GraphPage integration tests (real ImpactPanel, mocked DependencyGraph) ───
 
 /**
- * Clicking a node whose id starts with "endpoint-" opens the real ImpactPanel.
- * The heading and "Impact Analysis" label appear immediately on render.
+ * Clicking an endpoint node (node_type: "endpoint") opens the real ImpactPanel.
+ * The "Impact Analysis" label and path appear immediately on render.
  */
 test('graph_clicking_endpoint_node_shows_impact_panel', async () => {
   fetchGraph.mockResolvedValue({
-    nodes: [{ id: 'endpoint-3', name: 'DELETE /items/{id}' }],
+    nodes: [{
+      id: 'ep:3', node_type: 'endpoint', label: 'delete_item\nDELETE /items/{id}',
+      function_name: 'delete_item', method: 'DELETE', path: '/items/{id}',
+      file_path: 'routers/items.py', service_name: 'item-service', service_id: 1,
+    }],
     edges: [],
   })
   fetchImpactAnalysis.mockResolvedValue([])
@@ -246,58 +261,68 @@ test('graph_clicking_endpoint_node_shows_impact_panel', async () => {
   render(<GraphPage />)
 
   // Wait for DependencyGraph to render after fetchGraph resolves on mount
-  await waitFor(() => screen.getByText('DELETE /items/{id}'))
+  await waitFor(() => screen.getByTestId('node-ep:3'))
 
-  fireEvent.click(screen.getByText('DELETE /items/{id}'))
+  fireEvent.click(screen.getByTestId('node-ep:3'))
 
   // Real ImpactPanel header appears after selectedEndpoint is set
   await waitFor(() => {
     expect(screen.getByText('Impact Analysis')).toBeInTheDocument()
   })
-  // endpointLabel is forwarded from node.data.label → appears in the h2
-  expect(screen.getByRole('heading', { name: 'DELETE /items/{id}' })).toBeInTheDocument()
+  // method/path/functionName are forwarded from node.data
+  expect(screen.getByText('DELETE')).toBeInTheDocument()
+  expect(screen.getByText('/items/{id}')).toBeInTheDocument()
+  expect(screen.getByText('delete_item')).toBeInTheDocument()
 })
 
 /**
- * Clicking a node whose id does NOT start with "endpoint-" (a service node)
+ * Clicking a node whose node_type is "caller" (not "endpoint")
  * must not open ImpactPanel.
  */
-test('graph_clicking_service_node_does_not_show_impact_panel', async () => {
+test('graph_clicking_caller_node_does_not_show_impact_panel', async () => {
   fetchGraph.mockResolvedValue({
-    nodes: [{ id: '1', name: 'order-service' }],
+    nodes: [{
+      id: 'caller:1:lib/api.js:fetchUser', node_type: 'caller', label: 'fetchUser',
+      function_name: 'fetchUser', method: null, path: null,
+      file_path: 'lib/api.js', service_name: 'order-service', service_id: 1,
+    }],
     edges: [],
   })
 
   render(<GraphPage />)
 
-  await waitFor(() => screen.getByText('order-service'))
+  await waitFor(() => screen.getByTestId('node-caller:1:lib/api.js:fetchUser'))
 
-  fireEvent.click(screen.getByText('order-service'))
+  fireEvent.click(screen.getByTestId('node-caller:1:lib/api.js:fetchUser'))
 
   // handleNodeClick returns early for non-endpoint nodes
   expect(screen.queryByText('Impact Analysis')).not.toBeInTheDocument()
 })
 
 /**
- * Clicking the close button (aria-label="Close") inside ImpactPanel calls
- * onClose, which sets selectedEndpoint to null, unmounting ImpactPanel.
+ * Clicking the close button (aria-label="Close panel") inside ImpactPanel
+ * calls onClose, which sets selectedEndpoint to null, unmounting ImpactPanel.
  */
 test('graph_impact_panel_closes_when_close_button_clicked', async () => {
   fetchGraph.mockResolvedValue({
-    nodes: [{ id: 'endpoint-5', name: 'GET /users/{id}' }],
+    nodes: [{
+      id: 'ep:5', node_type: 'endpoint', label: 'get_user\nGET /users/{id}',
+      function_name: 'get_user', method: 'GET', path: '/users/{id}',
+      file_path: 'routers/users.py', service_name: 'user-service', service_id: 2,
+    }],
     edges: [],
   })
   fetchImpactAnalysis.mockResolvedValue([])
 
   render(<GraphPage />)
 
-  await waitFor(() => screen.getByText('GET /users/{id}'))
+  await waitFor(() => screen.getByTestId('node-ep:5'))
 
   // Open the panel
-  fireEvent.click(screen.getByText('GET /users/{id}'))
+  fireEvent.click(screen.getByTestId('node-ep:5'))
   await waitFor(() => screen.getByText('Impact Analysis'))
 
-  // Close it — the ✕ button has aria-label="Close"
+  // Close it — the ✕ button has aria-label="Close panel"
   fireEvent.click(screen.getByRole('button', { name: /close/i }))
 
   await waitFor(() => {

@@ -292,6 +292,94 @@ async def test_analyze_consumer_edge_upserted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# test_analyze_consumer_edge_includes_caller_context
+# ---------------------------------------------------------------------------
+
+async def test_analyze_consumer_edge_includes_caller_context(tmp_path):
+    svc_dir = tmp_path / "order-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service code")
+
+    svc_row = _Row({"id": 2})
+    ep_row = _Row({"id": 5, "method": "GET", "path": "/users/{id}", "service_id": 10})
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=svc_row)
+    conn.fetch = AsyncMock(return_value=[ep_row])
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_http_calls",
+               return_value=[{"url": "http://user-service/users/123", "caller_function_name": "sync_user"}]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp.status_code == 200
+    edge_calls = [c for c in conn.execute.call_args_list if "consumer_edges" in c.args[0]]
+    assert len(edge_calls) == 1
+    edge_args = edge_calls[0].args
+    assert edge_args[-2] == "main.py"
+    assert edge_args[-1] == "sync_user"
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_js_consumer_edge_includes_caller_context
+# ---------------------------------------------------------------------------
+
+async def test_analyze_js_consumer_edge_includes_caller_context(tmp_path):
+    svc_dir = tmp_path / "order-service"
+    svc_dir.mkdir()
+    (svc_dir / "package.json").write_text("{}")
+    lib_dir = svc_dir / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "api.js").write_text("// caller code")
+
+    svc_row = _Row({"id": 2})
+    ep_row = _Row({"id": 5, "method": "GET", "path": "/users/{id}", "service_id": 10})
+    abs_js_file = str(lib_dir / "api.js")
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=svc_row)
+    conn.fetch = AsyncMock(return_value=[ep_row])
+    conn.execute = AsyncMock(return_value=None)
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_js_routes", return_value=[]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.extract_js_http_calls",
+               return_value=[{
+                   "url": "http://user-service/users/123",
+                   "file_path": abs_js_file,
+                   "caller_function_name": "fetchUser",
+               }]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp.status_code == 200
+    edge_calls = [c for c in conn.execute.call_args_list if "consumer_edges" in c.args[0]]
+    assert len(edge_calls) == 1
+    edge_args = edge_calls[0].args
+    assert edge_args[-2] == "lib/api.js"
+    assert edge_args[-1] == "fetchUser"
+
+
+# ---------------------------------------------------------------------------
 # test_analyze_skips_fqdn_paths_that_dont_match
 # ---------------------------------------------------------------------------
 
@@ -533,8 +621,10 @@ async def test_delete_service_checks_ownership_before_delete():
 
 async def test_get_endpoints_returns_all():
     rows = [
-        _Row({"id": 1, "service_id": 1, "method": "GET", "path": "/users/{id}", "spec_source": "openapi"}),
-        _Row({"id": 2, "service_id": 2, "method": "POST", "path": "/orders/create", "spec_source": "decorator"}),
+        _Row({"id": 1, "service_id": 1, "method": "GET", "path": "/users/{id}", "spec_source": "openapi",
+              "file_path": None, "function_name": None}),
+        _Row({"id": 2, "service_id": 2, "method": "POST", "path": "/orders/create", "spec_source": "decorator",
+              "file_path": "routers/orders.py", "function_name": "create_order"}),
     ]
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows)
@@ -554,7 +644,8 @@ async def test_get_endpoints_returns_all():
 
 async def test_get_endpoints_filters_by_service_id():
     rows = [
-        _Row({"id": 1, "service_id": 1, "method": "GET", "path": "/users/{id}", "spec_source": "openapi"}),
+        _Row({"id": 1, "service_id": 1, "method": "GET", "path": "/users/{id}", "spec_source": "openapi",
+              "file_path": None, "function_name": None}),
     ]
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows)
@@ -572,6 +663,26 @@ async def test_get_endpoints_filters_by_service_id():
     assert data[0]["path"] == "/users/{id}"
 
 
+async def test_get_endpoints_includes_file_path_and_function_name():
+    rows = [
+        _Row({"id": 1, "service_id": 1, "method": "GET", "path": "/users/{id}", "spec_source": "decorator",
+              "file_path": "routers/users.py", "function_name": "get_user"}),
+    ]
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=rows)
+    pool = _make_pool(conn)
+
+    with patch("routers.endpoints.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get("/endpoints?service_id=1", headers=HEADERS)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data[0]["file_path"] == "routers/users.py"
+    assert data[0]["function_name"] == "get_user"
+
+
 async def test_get_endpoints_requires_token():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/endpoints")
@@ -585,9 +696,11 @@ async def test_get_endpoints_requires_token():
 
 async def test_get_impact_analysis_returns_consumers():
     rows = [
-        _Row({"service_name": "order-service", "call_count": 5,
+        _Row({"service_name": "order-service", "caller_function_name": "fetchUser",
+              "caller_file_path": "lib/api.js", "call_count": 5,
               "last_seen_at": datetime(2024, 1, 1, tzinfo=timezone.utc), "source": "static"}),
-        _Row({"service_name": "payment-service", "call_count": 2,
+        _Row({"service_name": "payment-service", "caller_function_name": "getUser",
+              "caller_file_path": "lib/client.js", "call_count": 2,
               "last_seen_at": datetime(2024, 1, 2, tzinfo=timezone.utc), "source": "static"}),
     ]
     conn = AsyncMock()
@@ -604,6 +717,8 @@ async def test_get_impact_analysis_returns_consumers():
     assert len(data) == 2
     assert data[0]["service_name"] == "order-service"
     assert data[0]["call_count"] == 5
+    assert data[0]["caller_function_name"] == "fetchUser"
+    assert data[0]["caller_file_path"] == "lib/api.js"
 
 
 async def test_get_impact_analysis_empty():
@@ -631,26 +746,29 @@ async def test_get_impact_analysis_requires_token():
 # GET /graph
 # ---------------------------------------------------------------------------
 
-async def test_get_graph_returns_nodes_and_edges():
-    service_rows = [
-        _Row({"id": 1, "name": "order-service"}),
-        _Row({"id": 2, "name": "user-service"}),
-    ]
-    endpoint_rows = [
-        _Row({"id": 5, "method": "GET", "path": "/users/{id}"}),
-    ]
-    edge_rows = [
-        _Row({
-            "caller_service_id": 1,
-            "endpoint_id": 5,
-            "endpoint_path": "/users/{id}",
-            "endpoint_method": "GET",
-            "call_count": 10,
-            "last_seen_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
-        }),
-    ]
+def _graph_row(**overrides):
+    row = {
+        "endpoint_id": 5,
+        "endpoint_service_id": 2,
+        "endpoint_service_name": "user-service",
+        "endpoint_file_path": "routers/users.py",
+        "endpoint_function_name": "get_user",
+        "method": "GET",
+        "path": "/users/{id}",
+        "caller_service_id": 1,
+        "caller_service_name": "order-service",
+        "caller_file_path": "lib/api.js",
+        "caller_function_name": "fetchUser",
+        "call_count": 10,
+        "last_seen_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return _Row(row)
+
+
+async def test_get_graph_returns_endpoint_and_caller_nodes():
     conn = AsyncMock()
-    conn.fetch = AsyncMock(side_effect=[service_rows, endpoint_rows, edge_rows])
+    conn.fetch = AsyncMock(return_value=[_graph_row()])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -662,18 +780,21 @@ async def test_get_graph_returns_nodes_and_edges():
 
     assert resp.status_code == 200
     data = resp.json()
-    # 2 service nodes + 1 endpoint node
-    assert len(data["nodes"]) == 3
-    assert {"id": "1", "name": "order-service"} in data["nodes"]
-    assert {"id": "endpoint-5", "name": "GET /users/{id}"} in data["nodes"]
+    assert len(data["nodes"]) == 2
+    endpoint_node = next(n for n in data["nodes"] if n["id"] == "ep:5")
+    assert endpoint_node["node_type"] == "endpoint"
+    assert endpoint_node["method"] == "GET"
+    assert endpoint_node["path"] == "/users/{id}"
+    caller_node = next(n for n in data["nodes"] if n["id"].startswith("caller:1:"))
+    assert caller_node["node_type"] == "caller"
     assert len(data["edges"]) == 1
-    assert data["edges"][0]["source"] == "1"
-    assert data["edges"][0]["target"] == "endpoint-5"
+    assert data["edges"][0]["source"] == caller_node["id"]
+    assert data["edges"][0]["target"] == "ep:5"
 
 
 async def test_get_graph_empty_db():
     conn = AsyncMock()
-    conn.fetch = AsyncMock(side_effect=[[], [], []])
+    conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -701,9 +822,9 @@ async def test_get_graph_requires_repo_id():
     assert resp.status_code == 422
 
 
-async def test_get_graph_scopes_queries_by_repo_id():
+async def test_get_graph_scopes_query_by_repo_id():
     conn = AsyncMock()
-    conn.fetch = AsyncMock(side_effect=[[], [], []])
+    conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -714,26 +835,18 @@ async def test_get_graph_scopes_queries_by_repo_id():
             )
 
     assert resp.status_code == 200
-    assert conn.fetch.call_count == 3
-    for call in conn.fetch.call_args_list:
-        assert call.args[-1] == "iamaryan07/sample-services"
+    assert conn.fetch.call_count == 1
+    assert conn.fetch.call_args.args[-1] == "iamaryan07/sample-services"
 
 
 async def test_get_graph_includes_endpoint_nodes():
-    service_rows = [_Row({"id": 3, "name": "payment-service"})]
-    endpoint_rows = [_Row({"id": 7, "method": "POST", "path": "/payments/charge"})]
-    edge_rows = [
-        _Row({
-            "caller_service_id": 3,
-            "endpoint_id": 7,
-            "endpoint_path": "/payments/charge",
-            "endpoint_method": "POST",
-            "call_count": 4,
-            "last_seen_at": datetime(2024, 6, 1, tzinfo=timezone.utc),
-        }),
-    ]
     conn = AsyncMock()
-    conn.fetch = AsyncMock(side_effect=[service_rows, endpoint_rows, edge_rows])
+    conn.fetch = AsyncMock(return_value=[_graph_row(
+        endpoint_id=7, endpoint_service_id=3, endpoint_service_name="payment-service",
+        method="POST", path="/payments/charge",
+        caller_service_id=3, caller_service_name="payment-service",
+        call_count=4, last_seen_at=datetime(2024, 6, 1, tzinfo=timezone.utc),
+    )])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -745,11 +858,74 @@ async def test_get_graph_includes_endpoint_nodes():
 
     data = resp.json()
     node_ids = [n["id"] for n in data["nodes"]]
-    assert "endpoint-7" in node_ids
-    endpoint_node = next(n for n in data["nodes"] if n["id"] == "endpoint-7")
-    assert endpoint_node["name"] == "POST /payments/charge"
-    assert data["edges"][0]["target"] == "endpoint-7"
-    assert data["edges"][0]["source"] == "3"
+    assert "ep:7" in node_ids
+    endpoint_node = next(n for n in data["nodes"] if n["id"] == "ep:7")
+    assert endpoint_node["method"] == "POST"
+    assert endpoint_node["path"] == "/payments/charge"
+    assert data["edges"][0]["target"] == "ep:7"
+
+
+async def test_get_graph_deduplicates_shared_endpoint_node():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[
+        _graph_row(caller_service_id=1, caller_service_name="order-service",
+                   caller_file_path="lib/api.js", caller_function_name="fetchUser"),
+        _graph_row(caller_service_id=3, caller_service_name="payment-service",
+                   caller_file_path="lib/client.js", caller_function_name="getUser"),
+    ])
+    pool = _make_pool(conn)
+
+    with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
+
+    data = resp.json()
+    endpoint_nodes = [n for n in data["nodes"] if n["id"] == "ep:5"]
+    assert len(endpoint_nodes) == 1
+    edges_to_endpoint = [e for e in data["edges"] if e["target"] == "ep:5"]
+    assert len(edges_to_endpoint) == 2
+
+
+async def test_get_graph_deduplicates_shared_caller_node():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[
+        _graph_row(endpoint_id=5, path="/users/{id}"),
+        _graph_row(endpoint_id=6, path="/users/profile"),
+    ])
+    pool = _make_pool(conn)
+
+    with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
+
+    data = resp.json()
+    caller_nodes = [n for n in data["nodes"] if n["node_type"] == "caller"]
+    assert len(caller_nodes) == 1
+    edges_from_caller = [e for e in data["edges"] if e["source"] == caller_nodes[0]["id"]]
+    assert len(edges_from_caller) == 2
+
+
+async def test_get_graph_null_caller_function_name_labeled_unknown():
+    conn = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[_graph_row(caller_function_name=None)])
+    pool = _make_pool(conn)
+
+    with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.get(
+                "/graph?repo_id=iamaryan07/sample-services", headers=HEADERS
+            )
+
+    data = resp.json()
+    caller_node = next(n for n in data["nodes"] if n["node_type"] == "caller")
+    assert caller_node["label"] == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -933,15 +1109,13 @@ async def test_analyze_upsert_endpoint_idempotent(tmp_path):
     (svc_dir / "main.py").write_text("# service")
 
     conn = AsyncMock()
-    # First analyze: service upsert → row; endpoint upsert → row (new)
-    # Second analyze: service upsert → row (DO UPDATE); endpoint upsert → None (DO NOTHING);
-    #   fallback SELECT → row
+    # Endpoint upsert is ON CONFLICT DO UPDATE ... RETURNING id — always returns a row,
+    # both on first insert and on every re-analysis. No fallback SELECT branch exists anymore.
     conn.fetchrow = AsyncMock(side_effect=[
         _Row({"id": 1}),  # 1st analyze — service upsert
-        _Row({"id": 1}),  # 1st analyze — endpoint upsert (new)
+        _Row({"id": 1}),  # 1st analyze — endpoint upsert
         _Row({"id": 1}),  # 2nd analyze — service upsert (DO UPDATE)
-        None,             # 2nd analyze — endpoint upsert (DO NOTHING)
-        _Row({"id": 1}),  # 2nd analyze — endpoint fallback SELECT
+        _Row({"id": 1}),  # 2nd analyze — endpoint upsert (DO UPDATE)
     ])
     conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
@@ -964,10 +1138,43 @@ async def test_analyze_upsert_endpoint_idempotent(tmp_path):
     assert resp2.status_code == 200
     assert resp1.json()["endpoints"] == 1
     assert resp2.json()["endpoints"] == 1
-    # The endpoint upsert SQL uses ON CONFLICT DO NOTHING
+    # The endpoint upsert SQL uses ON CONFLICT DO UPDATE (not DO NOTHING)
     endpoint_upsert_sql = conn.fetchrow.call_args_list[1][0][0]
     assert "ON CONFLICT" in endpoint_upsert_sql
-    assert "DO NOTHING" in endpoint_upsert_sql
+    assert "DO UPDATE" in endpoint_upsert_sql
+
+
+# ---------------------------------------------------------------------------
+# test_analyze_endpoint_insert_includes_file_path_and_function_name
+# ---------------------------------------------------------------------------
+
+async def test_analyze_endpoint_insert_includes_file_path_and_function_name(tmp_path):
+    svc_dir = tmp_path / "my-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service")
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(side_effect=[_Row({"id": 1}), _Row({"id": 1})])
+    conn.fetch = AsyncMock(return_value=[])
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators",
+               return_value=[{"method": "GET", "path": "/items", "function_name": "get_item"}]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            resp = await client.post(ANALYZE_URL, json=PAYLOAD, headers=HEADERS)
+
+    assert resp.status_code == 200
+    endpoint_upsert_args = conn.fetchrow.call_args_list[1][0]
+    assert endpoint_upsert_args[5] == "main.py"
+    assert endpoint_upsert_args[6] == "get_item"
 
 
 # ---------------------------------------------------------------------------

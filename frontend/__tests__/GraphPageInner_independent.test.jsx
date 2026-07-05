@@ -1,16 +1,19 @@
 /**
- * Independent tests for app/graph/GraphPageInner.jsx (spec v2-08-scoped-graph).
+ * Independent tests for app/graph/GraphPageInner.jsx (spec v2-08-scoped-graph,
+ * updated for spec v2-11's endpoint-level node model).
  *
  * Derived by reading the implemented component directly -- not from the
  * spec's own "Test cases" section and not from any other pre-existing test
  * file for this page. Covers the core v2-08 behavior: reading `repo` from
  * the URL, fetching on mount, re-fetching when the URL changes, and the
- * loading/empty/error states around that fetch.
+ * loading/empty/error states around that fetch -- plus v2-11's raw
+ * GraphNode/GraphEdge shape and the ep:/caller: id scheme.
  *
- * React Flow cannot run in Jest, so @/components/DependencyGraph is
- * replaced with a lightweight stand-in that exposes node/edge counts and
- * forwards clicks to onNodeClick -- the same shape recommended for mocking
- * @xyflow/react directly.
+ * DependencyGraph now does its own raw-node -> React Flow transformation
+ * internally (using @dagrejs/dagre), so it's replaced here with a
+ * lightweight stand-in that renders each raw node's label and forwards
+ * clicks to onNodeClick with an RF-shaped { id, data } node, matching what
+ * the real component passes through from ReactFlow.
  */
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import GraphPageInner from '@/app/graph/GraphPageInner'
@@ -39,11 +42,13 @@ jest.mock('@/components/AuthGuard', () => {
 })
 
 jest.mock('@/components/ImpactPanel', () => {
-  return function MockImpactPanel({ endpointId, endpointLabel, onClose }) {
+  return function MockImpactPanel({ endpointId, method, path, functionName, onClose }) {
     return (
       <div data-testid="impact-panel">
         <span data-testid="impact-panel-id">{endpointId}</span>
-        <span data-testid="impact-panel-label">{endpointLabel}</span>
+        <span data-testid="impact-panel-method">{method}</span>
+        <span data-testid="impact-panel-path">{path}</span>
+        <span data-testid="impact-panel-function-name">{functionName}</span>
         <button onClick={onClose}>close-panel</button>
       </div>
     )
@@ -57,8 +62,12 @@ jest.mock('@/components/DependencyGraph', () => {
         <div data-testid="node-count">{nodes.length}</div>
         <div data-testid="edge-count">{edges.length}</div>
         {nodes.map((n) => (
-          <div key={n.id} data-testid={`node-${n.id}`} onClick={() => onNodeClick(null, n)}>
-            {n.data.label}
+          <div
+            key={n.id}
+            data-testid={`node-${n.id}`}
+            onClick={() => onNodeClick(null, { id: n.id, data: n })}
+          >
+            {n.label}
           </div>
         ))}
       </div>
@@ -76,6 +85,37 @@ beforeEach(() => {
   supabase.auth.signOut.mockResolvedValue(undefined)
 })
 
+const CALLER_NODE = {
+  id: 'caller:1:lib/api.js:fetchUser',
+  node_type: 'caller',
+  label: 'fetchUser',
+  function_name: 'fetchUser',
+  method: null,
+  path: null,
+  file_path: 'lib/api.js',
+  service_name: 'order-service',
+  service_id: 1,
+}
+
+const ENDPOINT_NODE = {
+  id: 'ep:10',
+  node_type: 'endpoint',
+  label: 'get_user\nGET /users/{id}',
+  function_name: 'get_user',
+  method: 'GET',
+  path: '/users/{id}',
+  file_path: 'routers/users.py',
+  service_name: 'user-service',
+  service_id: 2,
+}
+
+const ONE_EDGE = {
+  source: CALLER_NODE.id,
+  target: ENDPOINT_NODE.id,
+  call_count: 5,
+  last_seen_at: '2024-01-01T00:00:00Z',
+}
+
 // ---------------------------------------------------------------------------
 // Happy path
 // ---------------------------------------------------------------------------
@@ -84,20 +124,8 @@ describe('GraphPageInner - happy path', () => {
   test('fetches the graph for the repo id in the URL and renders returned nodes and edges', async () => {
     mockSearchParamsGet.mockReturnValue('acme/sample-services')
     fetchGraph.mockResolvedValue({
-      nodes: [
-        { id: '1', name: 'order-service' },
-        { id: 'endpoint-10', name: 'GET /users/{id}' },
-      ],
-      edges: [
-        {
-          source: '1',
-          target: 'endpoint-10',
-          endpoint_method: 'GET',
-          endpoint_path: '/users/{id}',
-          call_count: 5,
-          last_seen_at: '2024-01-01T00:00:00Z',
-        },
-      ],
+      nodes: [CALLER_NODE, ENDPOINT_NODE],
+      edges: [ONE_EDGE],
     })
 
     render(<GraphPageInner />)
@@ -107,40 +135,39 @@ describe('GraphPageInner - happy path', () => {
 
     expect(screen.getByTestId('node-count')).toHaveTextContent('2')
     expect(screen.getByTestId('edge-count')).toHaveTextContent('1')
-    expect(screen.getByTestId('node-endpoint-10')).toHaveTextContent('GET /users/{id}')
+    expect(screen.getByTestId(`node-${ENDPOINT_NODE.id}`)).toHaveTextContent('GET /users/{id}')
   })
 
-  test('clicking an endpoint node opens the impact panel with the parsed endpoint id and label', async () => {
+  test('clicking an endpoint node opens the impact panel with the endpoint id, method, path, and function name', async () => {
     mockSearchParamsGet.mockReturnValue('acme/sample-services')
     fetchGraph.mockResolvedValue({
-      nodes: [
-        { id: '1', name: 'order-service' },
-        { id: 'endpoint-10', name: 'GET /users/{id}' },
-      ],
+      nodes: [CALLER_NODE, ENDPOINT_NODE],
       edges: [],
     })
 
     render(<GraphPageInner />)
-    await screen.findByTestId('node-endpoint-10')
+    await screen.findByTestId(`node-${ENDPOINT_NODE.id}`)
 
-    fireEvent.click(screen.getByTestId('node-endpoint-10'))
+    fireEvent.click(screen.getByTestId(`node-${ENDPOINT_NODE.id}`))
 
     expect(screen.getByTestId('impact-panel')).toBeInTheDocument()
     expect(screen.getByTestId('impact-panel-id')).toHaveTextContent('10')
-    expect(screen.getByTestId('impact-panel-label')).toHaveTextContent('GET /users/{id}')
+    expect(screen.getByTestId('impact-panel-method')).toHaveTextContent('GET')
+    expect(screen.getByTestId('impact-panel-path')).toHaveTextContent('/users/{id}')
+    expect(screen.getByTestId('impact-panel-function-name')).toHaveTextContent('get_user')
   })
 
-  test('clicking a service node does not open the impact panel', async () => {
+  test('clicking a caller node does not open the impact panel', async () => {
     mockSearchParamsGet.mockReturnValue('acme/sample-services')
     fetchGraph.mockResolvedValue({
-      nodes: [{ id: '1', name: 'order-service' }],
+      nodes: [CALLER_NODE],
       edges: [],
     })
 
     render(<GraphPageInner />)
-    await screen.findByTestId('node-1')
+    await screen.findByTestId(`node-${CALLER_NODE.id}`)
 
-    fireEvent.click(screen.getByTestId('node-1'))
+    fireEvent.click(screen.getByTestId(`node-${CALLER_NODE.id}`))
 
     expect(screen.queryByTestId('impact-panel')).not.toBeInTheDocument()
   })
@@ -229,17 +256,19 @@ describe('GraphPageInner - repo isolation across URL changes', () => {
   test('refetches and fully replaces the graph when the repo id in the URL changes', async () => {
     mockSearchParamsGet.mockReturnValue('acme/repo-a')
     fetchGraph.mockResolvedValueOnce({
-      nodes: [{ id: '1', name: 'repo-a-service' }],
+      nodes: [{ ...CALLER_NODE, id: 'caller:1:lib/a.js:fnA', label: 'fnA', service_name: 'repo-a-service' }],
       edges: [],
     })
 
     const { rerender } = render(<GraphPageInner />)
 
-    await waitFor(() => expect(screen.getByTestId('node-1')).toHaveTextContent('repo-a-service'))
+    await waitFor(() =>
+      expect(screen.getByTestId('node-caller:1:lib/a.js:fnA')).toHaveTextContent('fnA')
+    )
 
     mockSearchParamsGet.mockReturnValue('acme/repo-b')
     fetchGraph.mockResolvedValueOnce({
-      nodes: [{ id: '2', name: 'repo-b-service' }],
+      nodes: [{ ...CALLER_NODE, id: 'caller:2:lib/b.js:fnB', label: 'fnB', service_name: 'repo-b-service' }],
       edges: [],
     })
 
@@ -251,8 +280,8 @@ describe('GraphPageInner - repo isolation across URL changes', () => {
     })
 
     await waitFor(() => {
-      expect(screen.queryByTestId('node-1')).not.toBeInTheDocument()
-      expect(screen.getByTestId('node-2')).toHaveTextContent('repo-b-service')
+      expect(screen.queryByTestId('node-caller:1:lib/a.js:fnA')).not.toBeInTheDocument()
+      expect(screen.getByTestId('node-caller:2:lib/b.js:fnB')).toHaveTextContent('fnB')
     })
   })
 })

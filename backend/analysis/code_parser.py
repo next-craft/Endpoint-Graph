@@ -19,7 +19,9 @@ DECORATOR_QUERY = PY_LANGUAGE.query("""
         object: (identifier)
         attribute: (identifier) @method)
       arguments: (argument_list
-        (string) @path))))
+        (string) @path)))
+  definition: (function_definition
+    name: (identifier) @function_name))
 """)
 
 HTTP_CALL_QUERY = PY_LANGUAGE.query("""
@@ -92,6 +94,32 @@ def _reconstruct_fstring(node) -> str:
     return "".join(parts)
 
 
+def _enclosing_py_function_name(node) -> str | None:
+    current = node.parent
+    while current is not None:
+        if current.type == "function_definition":
+            name_node = current.child_by_field_name("name")
+            return name_node.text.decode("utf-8") if name_node is not None else None
+        current = current.parent
+    return None
+
+
+def _enclosing_js_function_name(node) -> str | None:
+    current = node.parent
+    while current is not None:
+        if current.type in ("function_declaration", "method_definition"):
+            name_node = current.child_by_field_name("name")
+            return name_node.text.decode("utf-8") if name_node is not None else None
+        if current.type == "arrow_function":
+            parent = current.parent
+            if parent is not None and parent.type == "variable_declarator":
+                name_node = parent.child_by_field_name("name")
+                if name_node is not None:
+                    return name_node.text.decode("utf-8")
+        current = current.parent
+    return None
+
+
 def _node_string_value(node) -> str | None:
     raw = node.text.decode("utf-8")
     try:
@@ -138,6 +166,7 @@ def extract_route_decorators(file_path: str) -> list[dict]:
         for _, match in DECORATOR_QUERY.matches(tree.root_node):
             method_node = match.get("method")
             path_node = match.get("path")
+            function_name_node = match.get("function_name")
             if method_node is None or path_node is None:
                 continue
             method_text = method_node.text.decode("utf-8").upper()
@@ -148,7 +177,8 @@ def extract_route_decorators(file_path: str) -> list[dict]:
             path_value = _node_string_value(path_node)
             if path_value is None:
                 continue
-            results.append({"method": method_text, "path": path_value})
+            function_name = function_name_node.text.decode("utf-8") if function_name_node is not None else None
+            results.append({"method": method_text, "path": path_value, "function_name": function_name})
         return results
     except Exception:
         return []
@@ -176,12 +206,12 @@ def extract_http_calls(file_path: str) -> list[dict]:
                 path = _extract_path_from_pattern(pattern)
                 if path is None:
                     continue
-                results.append({"url": path})
+                results.append({"url": path, "caller_function_name": _enclosing_py_function_name(url_node)})
                 continue
             url_value = _node_string_value(url_node)
             if url_value is None:
                 continue
-            results.append({"url": url_value})
+            results.append({"url": url_value, "caller_function_name": _enclosing_py_function_name(url_node)})
         return results
     except Exception:
         return []
@@ -224,7 +254,14 @@ def extract_js_routes(file_path: str) -> list[dict]:
                 continue
             if not isinstance(path_value, str):
                 continue
-            results.append({"method": method, "path": path_value, "spec_source": "decorator_js"})
+            function_name = None
+            next_named_sibling = path_node.next_named_sibling
+            if next_named_sibling is not None and next_named_sibling.type == "identifier":
+                function_name = next_named_sibling.text.decode("utf-8")
+            results.append({
+                "method": method, "path": path_value,
+                "spec_source": "decorator_js", "function_name": function_name,
+            })
 
         # Case B — Next.js App Router file-based routes
         api_path = _nextjs_api_path(file_path)
@@ -244,7 +281,10 @@ def extract_js_routes(file_path: str) -> list[dict]:
                     continue
                 name_text = name_node.text.decode("utf-8")
                 if name_text in {"GET", "POST", "PUT", "DELETE"}:
-                    results.append({"method": name_text, "path": api_path, "spec_source": "nextjs_route"})
+                    results.append({
+                        "method": name_text, "path": api_path,
+                        "spec_source": "nextjs_route", "function_name": name_text,
+                    })
 
         return results
     except Exception:
@@ -282,7 +322,7 @@ def _resolve_template_url(url_node, source: bytes) -> str | None:
     return _extract_path_from_pattern(pattern)
 
 
-def _collect_js_calls(query, tree_root, is_valid_call, resolve_url) -> list[str]:
+def _collect_js_calls(query, tree_root, is_valid_call, resolve_url, file_path) -> list[dict]:
     out = []
     for _, match in query.matches(tree_root):
         url_node = match.get("url")
@@ -290,11 +330,15 @@ def _collect_js_calls(query, tree_root, is_valid_call, resolve_url) -> list[str]
             continue
         url = resolve_url(url_node)
         if url is not None:
-            out.append(url)
+            out.append({
+                "url": url,
+                "file_path": file_path,
+                "caller_function_name": _enclosing_js_function_name(url_node),
+            })
     return out
 
 
-def extract_js_http_calls(file_path: str) -> list[str]:
+def extract_js_http_calls(file_path: str) -> list[dict]:
     try:
         lang, p = _get_js_parser(file_path)
         source = open(file_path, "rb").read()
@@ -309,7 +353,7 @@ def extract_js_http_calls(file_path: str) -> list[str]:
   arguments: (arguments
     (string) @url))
 """)
-        results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url)
+        results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url, file_path)
 
         # axios.get/post/put/delete("url")
         axios_query = lang.query("""
@@ -320,7 +364,7 @@ def extract_js_http_calls(file_path: str) -> list[str]:
   arguments: (arguments
     (string) @url))
 """)
-        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url)
+        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url, file_path)
 
         # fetch(`template literal`)
         fetch_template_query = lang.query("""
@@ -331,7 +375,7 @@ def extract_js_http_calls(file_path: str) -> list[str]:
 """)
         results += _collect_js_calls(
             fetch_template_query, root, _is_fetch_call,
-            lambda url_node: _resolve_template_url(url_node, source),
+            lambda url_node: _resolve_template_url(url_node, source), file_path,
         )
 
         # axios.get/post/put/delete(`template literal`)
@@ -345,7 +389,7 @@ def extract_js_http_calls(file_path: str) -> list[str]:
 """)
         results += _collect_js_calls(
             axios_template_query, root, _is_axios_call,
-            lambda url_node: _resolve_template_url(url_node, source),
+            lambda url_node: _resolve_template_url(url_node, source), file_path,
         )
 
         return results

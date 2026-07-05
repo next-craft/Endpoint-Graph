@@ -1,5 +1,6 @@
 """
-Independent tests for GET /graph?repo_id=... (spec v2-08-scoped-graph).
+Independent tests for GET /graph?repo_id=... (spec v2-08-scoped-graph, updated
+for spec v2-11's single-query endpoint/caller node model).
 
 These tests were derived by reading the implemented route
 (routers/graph.py), models.py, and auth.py directly -- not from the
@@ -30,32 +31,53 @@ GRAPH_URL = "/graph"
 HEADERS = {"X-GitHub-Token": "gh-token-abc", "Authorization": "Bearer irrelevant-when-overridden"}
 
 # ---------------------------------------------------------------------------
-# Row fixtures
+# Row fixtures — one row per consumer_edges join result (spec v2-11)
 # ---------------------------------------------------------------------------
 
-_SVC_ORDER = {"id": 1, "name": "order-service"}
-_SVC_USER = {"id": 2, "name": "user-service"}
-_SVC_PAYMENT = {"id": 3, "name": "payment-service"}
+def _row(**overrides):
+    row = {
+        "endpoint_id": 10,
+        "endpoint_service_id": 2,
+        "endpoint_service_name": "user-service",
+        "endpoint_file_path": "routers/users.py",
+        "endpoint_function_name": "get_user",
+        "method": "GET",
+        "path": "/users/{id}",
+        "caller_service_id": 1,
+        "caller_service_name": "order-service",
+        "caller_file_path": "lib/api.js",
+        "caller_function_name": "fetchUser",
+        "call_count": 5,
+        "last_seen_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return row
 
-_EP_GET_USER = {"id": 10, "method": "GET", "path": "/users/{id}"}
 
-_EDGE_ORDER_TO_USER = {
-    "caller_service_id": 1,
-    "endpoint_id": 10,
-    "endpoint_path": "/users/{id}",
-    "endpoint_method": "GET",
-    "call_count": 5,
-    "last_seen_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
-}
+class _Row:
+    """Minimal asyncpg Record-like object: supports row["key"] and is truthy."""
 
-_EDGE_PAYMENT_TO_USER = {
-    "caller_service_id": 3,
-    "endpoint_id": 10,
-    "endpoint_path": "/users/{id}",
-    "endpoint_method": "GET",
-    "call_count": 2,
-    "last_seen_at": datetime(2024, 2, 1, tzinfo=timezone.utc),
-}
+    def __init__(self, data: dict):
+        self._data = data
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def __bool__(self):
+        return True
+
+
+_EDGE_ORDER_TO_USER = _Row(_row(
+    caller_service_id=1, caller_service_name="order-service",
+    caller_file_path="lib/api.js", caller_function_name="fetchUser",
+    call_count=5, last_seen_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+))
+
+_EDGE_PAYMENT_TO_USER = _Row(_row(
+    caller_service_id=3, caller_service_name="payment-service",
+    caller_file_path="lib/client.js", caller_function_name="getUser",
+    call_count=2, last_seen_at=datetime(2024, 2, 1, tzinfo=timezone.utc),
+))
 
 
 # ---------------------------------------------------------------------------
@@ -81,11 +103,10 @@ def _make_pool(conn):
     return pool
 
 
-def _conn_returning(service_rows, endpoint_rows, edge_rows):
-    """conn.fetch() is called exactly 3 times in get_graph, in this order:
-    services, then endpoints, then edges."""
+def _conn_returning(rows):
+    """conn.fetch() is called exactly once in get_graph (the single joined query)."""
     conn = AsyncMock()
-    conn.fetch = AsyncMock(side_effect=[service_rows, endpoint_rows, edge_rows])
+    conn.fetch = AsyncMock(return_value=rows)
     conn.execute = AsyncMock()
     return conn
 
@@ -101,12 +122,8 @@ async def _request(repo_id="acme/sample-services", headers=None, params_override
 # Happy path
 # ---------------------------------------------------------------------------
 
-async def test_get_graph_returns_service_and_endpoint_nodes_with_edges():
-    conn = _conn_returning(
-        service_rows=[_SVC_ORDER, _SVC_USER],
-        endpoint_rows=[_EP_GET_USER],
-        edge_rows=[_EDGE_ORDER_TO_USER],
-    )
+async def test_get_graph_returns_endpoint_and_caller_nodes_with_edges():
+    conn = _conn_returning([_EDGE_ORDER_TO_USER])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -116,23 +133,24 @@ async def test_get_graph_returns_service_and_endpoint_nodes_with_edges():
     assert resp.status_code == 200
     body = resp.json()
 
-    node_ids = {n["id"] for n in body["nodes"]}
-    assert node_ids == {"1", "2", "endpoint-10"}
+    endpoint_node = next(n for n in body["nodes"] if n["id"] == "ep:10")
+    assert endpoint_node["node_type"] == "endpoint"
+    assert endpoint_node["method"] == "GET"
+    assert endpoint_node["path"] == "/users/{id}"
 
-    endpoint_node = next(n for n in body["nodes"] if n["id"] == "endpoint-10")
-    assert endpoint_node["name"] == "GET /users/{id}"
+    caller_node = next(n for n in body["nodes"] if n["node_type"] == "caller")
+    assert caller_node["id"] == "caller:1:lib/api.js:fetchUser"
+    assert caller_node["service_name"] == "order-service"
 
     assert len(body["edges"]) == 1
     edge = body["edges"][0]
-    assert edge["source"] == "1"
-    assert edge["target"] == "endpoint-10"
+    assert edge["source"] == caller_node["id"]
+    assert edge["target"] == "ep:10"
     assert edge["call_count"] == 5
-    assert edge["endpoint_method"] == "GET"
-    assert edge["endpoint_path"] == "/users/{id}"
 
 
 async def test_get_graph_sets_rls_context_with_authenticated_user_before_fetching():
-    conn = _conn_returning([], [], [])
+    conn = _conn_returning([])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -155,7 +173,7 @@ async def test_get_graph_sets_rls_context_with_authenticated_user_before_fetchin
 # ---------------------------------------------------------------------------
 
 async def test_get_graph_repo_with_no_tracked_services_returns_empty_graph():
-    conn = _conn_returning([], [], [])
+    conn = _conn_returning([])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -168,16 +186,13 @@ async def test_get_graph_repo_with_no_tracked_services_returns_empty_graph():
     assert body["edges"] == []
 
 
-async def test_get_graph_services_with_no_consumer_edges_yield_service_nodes_only():
+async def test_get_graph_services_with_no_consumer_edges_yield_no_nodes():
     """A repo can have tracked services with no recorded consumer_edges yet
     (e.g. right after Track, before any caller relationship is discovered).
-    No endpoint node should appear because the endpoint query is driven off
-    an inner join with consumer_edges."""
-    conn = _conn_returning(
-        service_rows=[_SVC_ORDER, _SVC_USER],
-        endpoint_rows=[],
-        edge_rows=[],
-    )
+    Per spec v2-11, node identity only exists via consumer_edges rows -- a
+    service that neither calls nor is called yields zero nodes, not a
+    standalone service-level node (that concept no longer exists)."""
+    conn = _conn_returning([])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -186,17 +201,15 @@ async def test_get_graph_services_with_no_consumer_edges_yield_service_nodes_onl
 
     assert resp.status_code == 200
     body = resp.json()
-    node_ids = {n["id"] for n in body["nodes"]}
-    assert node_ids == {"1", "2"}
-    assert not any(n["id"].startswith("endpoint-") for n in body["nodes"])
+    assert body["nodes"] == []
     assert body["edges"] == []
 
 
 async def test_get_graph_repo_id_with_special_characters_forwarded_unchanged():
-    """repo_id is used verbatim in every query -- no trimming/decoding should
+    """repo_id is used verbatim in the query -- no trimming/decoding should
     be applied by the route itself."""
     tricky_repo_id = "acme-org/sample_services.v2"
-    conn = _conn_returning([], [], [])
+    conn = _conn_returning([])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -204,9 +217,8 @@ async def test_get_graph_repo_id_with_special_characters_forwarded_unchanged():
         resp = await _request(repo_id=tricky_repo_id)
 
     assert resp.status_code == 200
-    assert conn.fetch.call_count == 3
-    for call in conn.fetch.call_args_list:
-        assert call.args[-1] == tricky_repo_id
+    assert conn.fetch.call_count == 1
+    assert conn.fetch.call_args.args[-1] == tricky_repo_id
 
 
 # ---------------------------------------------------------------------------
@@ -247,14 +259,10 @@ async def test_get_graph_malformed_authorization_header_returns_401(real_auth):
 # ---------------------------------------------------------------------------
 
 async def test_get_graph_endpoint_with_multiple_callers_appears_once_with_two_edges():
-    """Exercises the full row-to-graph assembly across 3 services and 2
-    edges: the DISTINCT in the endpoint query must collapse the endpoint
-    into a single node while both caller edges still surface."""
-    conn = _conn_returning(
-        service_rows=[_SVC_ORDER, _SVC_USER, _SVC_PAYMENT],
-        endpoint_rows=[_EP_GET_USER],
-        edge_rows=[_EDGE_ORDER_TO_USER, _EDGE_PAYMENT_TO_USER],
-    )
+    """Exercises the full row-to-graph assembly across 2 caller services and 1
+    endpoint: dedup-by-id must collapse the endpoint into a single node while
+    both caller edges still surface as two distinct caller nodes/edges."""
+    conn = _conn_returning([_EDGE_ORDER_TO_USER, _EDGE_PAYMENT_TO_USER])
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -264,15 +272,13 @@ async def test_get_graph_endpoint_with_multiple_callers_appears_once_with_two_ed
     assert resp.status_code == 200
     body = resp.json()
 
-    endpoint_nodes = [n for n in body["nodes"] if n["id"] == "endpoint-10"]
+    endpoint_nodes = [n for n in body["nodes"] if n["id"] == "ep:10"]
     assert len(endpoint_nodes) == 1
 
-    service_node_ids = {n["id"] for n in body["nodes"] if n["id"] != "endpoint-10"}
-    assert service_node_ids == {"1", "2", "3"}
+    caller_nodes = [n for n in body["nodes"] if n["node_type"] == "caller"]
+    assert len(caller_nodes) == 2
 
     assert len(body["edges"]) == 2
-    sources = {e["source"] for e in body["edges"]}
-    assert sources == {"1", "3"}
-    assert all(e["target"] == "endpoint-10" for e in body["edges"])
+    assert all(e["target"] == "ep:10" for e in body["edges"])
     call_counts = sorted(e["call_count"] for e in body["edges"])
     assert call_counts == [2, 5]

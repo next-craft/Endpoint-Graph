@@ -27,10 +27,14 @@ class EndpointOut(BaseModel):
     method: str
     path: str
     spec_source: Optional[str]
+    file_path: Optional[str]
+    function_name: Optional[str]
 
 
 class ConsumerOut(BaseModel):
     service_name: str
+    caller_function_name: Optional[str]
+    caller_file_path: Optional[str]
     call_count: int
     last_seen_at: datetime
     source: str
@@ -38,14 +42,19 @@ class ConsumerOut(BaseModel):
 
 class GraphNode(BaseModel):
     id: str
-    name: str
+    node_type: str
+    label: str
+    function_name: Optional[str]
+    method: Optional[str]
+    path: Optional[str]
+    file_path: Optional[str]
+    service_name: str
+    service_id: int
 
 
 class GraphEdge(BaseModel):
     source: str
     target: str
-    endpoint_path: str
-    endpoint_method: str
     call_count: int
     last_seen_at: datetime
 
