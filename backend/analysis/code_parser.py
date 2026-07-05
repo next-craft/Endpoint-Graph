@@ -31,10 +31,65 @@ HTTP_CALL_QUERY = PY_LANGUAGE.query("""
     (string) @url))
 """)
 
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
 
 def _is_fstring(node) -> bool:
     raw = node.text.decode("utf-8")
     return raw.startswith(("f'", 'f"', "F'", 'F"'))
+
+
+def _safe_decode(raw: bytes) -> str:
+    # Isolates decode failures to the one fragment being decoded, mirroring
+    # _node_string_value's try/except — one malformed byte sequence in a
+    # single call site must not blank out every other call already found
+    # in the file via the caller's blanket `except Exception: return []`.
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _extract_path_from_pattern(pattern: str) -> str | None:
+    # If the pattern starts with a scheme (http://, {param}:// is not valid
+    # here since a scheme is always static), skip past "://" and any host
+    # segment (static or "{param}") so the search lands on the real path
+    # instead of matching the "//" that follows the scheme.
+    match = _SCHEME_RE.match(pattern)
+    search_from = match.end() if match else 0
+    slash_idx = pattern.find("/", search_from)
+    if slash_idx == -1:
+        return None  # no path at all (e.g. a bare host) — caller must skip this result
+    return pattern[slash_idx:]
+
+
+def _reconstruct_template_string(node, source: bytes) -> str:
+    # Unlike Python f-strings (see _reconstruct_fstring), literal text between
+    # ${...} substitutions is NOT exposed as its own child node in this pinned
+    # grammar — it must be sliced directly out of the raw source bytes by
+    # offset instead of read off a node via `.text`.
+    parts = []
+    cursor = node.start_byte + 1  # skip opening backtick
+    end = node.end_byte - 1  # exclude closing backtick
+    for child in node.children:
+        if child.type == "template_substitution":
+            if child.start_byte > cursor:
+                parts.append(_safe_decode(source[cursor:child.start_byte]))
+            parts.append("{param}")
+            cursor = child.end_byte
+    if cursor < end:
+        parts.append(_safe_decode(source[cursor:end]))
+    return "".join(parts)
+
+
+def _reconstruct_fstring(node) -> str:
+    parts = []
+    for child in node.children:
+        if child.type == "string_content":
+            parts.append(_safe_decode(child.text))
+        elif child.type == "interpolation":
+            parts.append("{param}")
+    return "".join(parts)
 
 
 def _node_string_value(node) -> str | None:
@@ -117,6 +172,11 @@ def extract_http_calls(file_path: str) -> list[dict]:
             if method_text not in {"get", "post", "put", "delete"}:
                 continue
             if _is_fstring(url_node):
+                pattern = _reconstruct_fstring(url_node)
+                path = _extract_path_from_pattern(pattern)
+                if path is None:
+                    continue
+                results.append({"url": path})
                 continue
             url_value = _node_string_value(url_node)
             if url_value is None:
@@ -191,11 +251,55 @@ def extract_js_routes(file_path: str) -> list[dict]:
         return []
 
 
+def _is_fetch_call(match) -> bool:
+    fn_node = match.get("fn")
+    return fn_node is not None and fn_node.text.decode("utf-8") == "fetch"
+
+
+def _is_axios_call(match) -> bool:
+    lib_node = match.get("lib")
+    method_node = match.get("method")
+    if lib_node is None or method_node is None:
+        return False
+    if lib_node.text.decode("utf-8") != "axios":
+        return False
+    return method_node.text.decode("utf-8") in {"get", "post", "put", "delete"}
+
+
+def _resolve_plain_string_url(url_node) -> str | None:
+    raw = url_node.text.decode("utf-8")
+    if raw.startswith("`"):
+        return None
+    try:
+        url = ast.literal_eval(raw)
+    except Exception:
+        return None
+    return url if isinstance(url, str) else None
+
+
+def _resolve_template_url(url_node, source: bytes) -> str | None:
+    pattern = _reconstruct_template_string(url_node, source)
+    return _extract_path_from_pattern(pattern)
+
+
+def _collect_js_calls(query, tree_root, is_valid_call, resolve_url) -> list[str]:
+    out = []
+    for _, match in query.matches(tree_root):
+        url_node = match.get("url")
+        if url_node is None or not is_valid_call(match):
+            continue
+        url = resolve_url(url_node)
+        if url is not None:
+            out.append(url)
+    return out
+
+
 def extract_js_http_calls(file_path: str) -> list[str]:
     try:
         lang, p = _get_js_parser(file_path)
         source = open(file_path, "rb").read()
         tree = p.parse(source)
+        root = tree.root_node
         results = []
 
         # fetch("url")
@@ -205,22 +309,7 @@ def extract_js_http_calls(file_path: str) -> list[str]:
   arguments: (arguments
     (string) @url))
 """)
-        for _, match in fetch_query.matches(tree.root_node):
-            fn_node = match.get("fn")
-            url_node = match.get("url")
-            if fn_node is None or url_node is None:
-                continue
-            if fn_node.text.decode("utf-8") != "fetch":
-                continue
-            raw = url_node.text.decode("utf-8")
-            if raw.startswith("`"):
-                continue
-            try:
-                url = ast.literal_eval(raw)
-            except Exception:
-                continue
-            if isinstance(url, str):
-                results.append(url)
+        results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url)
 
         # axios.get/post/put/delete("url")
         axios_query = lang.query("""
@@ -231,25 +320,33 @@ def extract_js_http_calls(file_path: str) -> list[str]:
   arguments: (arguments
     (string) @url))
 """)
-        for _, match in axios_query.matches(tree.root_node):
-            lib_node = match.get("lib")
-            method_node = match.get("method")
-            url_node = match.get("url")
-            if lib_node is None or method_node is None or url_node is None:
-                continue
-            if lib_node.text.decode("utf-8") != "axios":
-                continue
-            if method_node.text.decode("utf-8") not in {"get", "post", "put", "delete"}:
-                continue
-            raw = url_node.text.decode("utf-8")
-            if raw.startswith("`"):
-                continue
-            try:
-                url = ast.literal_eval(raw)
-            except Exception:
-                continue
-            if isinstance(url, str):
-                results.append(url)
+        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url)
+
+        # fetch(`template literal`)
+        fetch_template_query = lang.query("""
+(call_expression
+  function: (identifier) @fn
+  arguments: (arguments
+    (template_string) @url))
+""")
+        results += _collect_js_calls(
+            fetch_template_query, root, _is_fetch_call,
+            lambda url_node: _resolve_template_url(url_node, source),
+        )
+
+        # axios.get/post/put/delete(`template literal`)
+        axios_template_query = lang.query("""
+(call_expression
+  function: (member_expression
+    object: (identifier) @lib
+    property: (property_identifier) @method)
+  arguments: (arguments
+    (template_string) @url))
+""")
+        results += _collect_js_calls(
+            axios_template_query, root, _is_axios_call,
+            lambda url_node: _resolve_template_url(url_node, source),
+        )
 
         return results
     except Exception:
