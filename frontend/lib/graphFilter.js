@@ -3,8 +3,8 @@ export function filterGraph(nodes, edges, query) {
   if (!q) return { visibleNodes: nodes, visibleEdges: edges }
 
   const visibleNodes = nodes.filter((node) => {
-    if (!node.id.startsWith('endpoint-')) return true
-    return node.data.label.toLowerCase().includes(q)
+    if (node.node_type !== 'endpoint') return true
+    return node.label.toLowerCase().includes(q)
   })
 
   const visibleNodeIds = new Set(visibleNodes.map((n) => n.id))

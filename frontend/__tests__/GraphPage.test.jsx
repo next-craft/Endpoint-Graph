@@ -25,16 +25,16 @@ jest.mock('@/components/DependencyGraph', () => ({
         {nodes.map((n) => (
           <div
             key={n.id}
-            data-testid="graph-node"
+            data-testid={`node-${n.id}`}
             data-node-id={n.id}
-            data-label={n.data.label}
-            onClick={(e) => onNodeClick && onNodeClick(e, n)}
+            data-label={n.label}
+            onClick={(e) => onNodeClick && onNodeClick(e, { id: n.id, data: n })}
           >
-            {n.data.label}
+            {n.label}
           </div>
         ))}
         {edges.map((e) => (
-          <div key={e.id} data-testid="graph-edge" data-edge-id={e.id} />
+          <div key={`${e.source}-${e.target}`} data-testid="graph-edge" data-edge-source={e.source} data-edge-target={e.target} />
         ))}
       </div>
     )
@@ -43,12 +43,14 @@ jest.mock('@/components/DependencyGraph', () => ({
 
 jest.mock('@/components/ImpactPanel', () => ({
   __esModule: true,
-  default: function MockImpactPanel({ endpointId, endpointLabel, onClose }) {
+  default: function MockImpactPanel({ endpointId, method, path, functionName, onClose }) {
     return (
       <div
         data-testid="impact-panel"
         data-endpoint-id={String(endpointId)}
-        data-endpoint-label={endpointLabel}
+        data-method={method}
+        data-path={path}
+        data-function-name={functionName}
       >
         <button onClick={onClose}>Close</button>
       </div>
@@ -79,15 +81,21 @@ beforeEach(() => {
 test('test_graph_page_transforms_fetchGraph_response', async () => {
   fetchGraph.mockResolvedValue({
     nodes: [
-      { id: '1', name: 'order-service' },
-      { id: 'endpoint-5', name: 'GET /users/{id}' },
+      {
+        id: 'caller:1:lib/api.js:fetchUser', node_type: 'caller', label: 'fetchUser',
+        function_name: 'fetchUser', method: null, path: null,
+        file_path: 'lib/api.js', service_name: 'order-service', service_id: 1,
+      },
+      {
+        id: 'ep:5', node_type: 'endpoint', label: 'get_user\nGET /users/{id}',
+        function_name: 'get_user', method: 'GET', path: '/users/{id}',
+        file_path: 'routers/users.py', service_name: 'user-service', service_id: 2,
+      },
     ],
     edges: [
       {
-        source: '1',
-        target: 'endpoint-5',
-        endpoint_method: 'GET',
-        endpoint_path: '/users/{id}',
+        source: 'caller:1:lib/api.js:fetchUser',
+        target: 'ep:5',
         call_count: 5,
         last_seen_at: '2024-01-01T00:00:00',
       },
@@ -97,13 +105,14 @@ test('test_graph_page_transforms_fetchGraph_response', async () => {
   render(<GraphPage />)
 
   await waitFor(() => {
-    expect(screen.getByText('order-service')).toBeInTheDocument()
+    expect(screen.getByText('fetchUser')).toBeInTheDocument()
   })
 
   expect(fetchGraph).toHaveBeenCalledWith('iamaryan07/sample-services')
 
   const edge = screen.getByTestId('graph-edge')
-  expect(edge).toHaveAttribute('data-edge-id', '1-endpoint-5-GET-/users/{id}')
+  expect(edge).toHaveAttribute('data-edge-source', 'caller:1:lib/api.js:fetchUser')
+  expect(edge).toHaveAttribute('data-edge-target', 'ep:5')
 })
 
 test('test_graph_page_shows_error_when_fetchGraph_fails', async () => {
@@ -119,19 +128,23 @@ test('test_graph_page_shows_error_when_fetchGraph_fails', async () => {
   expect(screen.queryByTestId('dependency-graph')).not.toBeInTheDocument()
 })
 
-test('test_handleNodeClick_ignores_service_nodes', async () => {
+test('test_handleNodeClick_ignores_caller_nodes', async () => {
   fetchGraph.mockResolvedValue({
-    nodes: [{ id: '1', name: 'order-service' }],
+    nodes: [{
+      id: 'caller:1:lib/api.js:fetchUser', node_type: 'caller', label: 'fetchUser',
+      function_name: 'fetchUser', method: null, path: null,
+      file_path: 'lib/api.js', service_name: 'order-service', service_id: 1,
+    }],
     edges: [],
   })
 
   render(<GraphPage />)
 
   await waitFor(() => {
-    expect(screen.getByText('order-service')).toBeInTheDocument()
+    expect(screen.getByText('fetchUser')).toBeInTheDocument()
   })
 
-  fireEvent.click(screen.getByText('order-service'))
+  fireEvent.click(screen.getByText('fetchUser'))
 
   expect(screen.queryByTestId('impact-panel')).not.toBeInTheDocument()
 })
@@ -139,8 +152,16 @@ test('test_handleNodeClick_ignores_service_nodes', async () => {
 test('test_handleNodeClick_sets_state_for_endpoint_nodes', async () => {
   fetchGraph.mockResolvedValue({
     nodes: [
-      { id: '1', name: 'order-service' },
-      { id: 'endpoint-5', name: 'GET /users/{id}' },
+      {
+        id: 'caller:1:lib/api.js:fetchUser', node_type: 'caller', label: 'fetchUser',
+        function_name: 'fetchUser', method: null, path: null,
+        file_path: 'lib/api.js', service_name: 'order-service', service_id: 1,
+      },
+      {
+        id: 'ep:5', node_type: 'endpoint', label: 'get_user\nGET /users/{id}',
+        function_name: 'get_user', method: 'GET', path: '/users/{id}',
+        file_path: 'routers/users.py', service_name: 'user-service', service_id: 2,
+      },
     ],
     edges: [],
   })
@@ -148,20 +169,19 @@ test('test_handleNodeClick_sets_state_for_endpoint_nodes', async () => {
   render(<GraphPage />)
 
   await waitFor(() => {
-    expect(screen.getByText('GET /users/{id}')).toBeInTheDocument()
+    expect(screen.getByTestId('node-ep:5')).toBeInTheDocument()
   })
 
-  fireEvent.click(screen.getByText('GET /users/{id}'))
+  fireEvent.click(screen.getByTestId('node-ep:5'))
 
   await waitFor(() => {
     expect(screen.getByTestId('impact-panel')).toBeInTheDocument()
   })
 
   expect(screen.getByTestId('impact-panel')).toHaveAttribute('data-endpoint-id', '5')
-  expect(screen.getByTestId('impact-panel')).toHaveAttribute(
-    'data-endpoint-label',
-    'GET /users/{id}'
-  )
+  expect(screen.getByTestId('impact-panel')).toHaveAttribute('data-method', 'GET')
+  expect(screen.getByTestId('impact-panel')).toHaveAttribute('data-path', '/users/{id}')
+  expect(screen.getByTestId('impact-panel')).toHaveAttribute('data-function-name', 'get_user')
 })
 
 test('test_graph_page_shows_empty_state_when_no_repo_param', async () => {

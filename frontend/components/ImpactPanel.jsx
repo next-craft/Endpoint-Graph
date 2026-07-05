@@ -21,15 +21,7 @@ const METHOD_COLORS = {
   PATCH:  '#a78bfa',
 }
 
-function parseLabel(label) {
-  const parts = label.trim().split(' ')
-  if (parts.length >= 2 && ['GET','POST','PUT','DELETE','PATCH'].includes(parts[0])) {
-    return { method: parts[0], path: parts.slice(1).join(' ') }
-  }
-  return { method: null, path: label }
-}
-
-export default function ImpactPanel({ endpointId, endpointLabel, onClose }) {
+export default function ImpactPanel({ endpointId, method, path, functionName, onClose }) {
   const [consumers, setConsumers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -44,7 +36,6 @@ export default function ImpactPanel({ endpointId, endpointLabel, onClose }) {
       .finally(() => setLoading(false))
   }, [endpointId])
 
-  const { method, path } = parseLabel(endpointLabel)
   const maxCallCount = consumers.length > 0 ? Math.max(...consumers.map((c) => c.call_count)) : 1
 
   return (
@@ -56,6 +47,9 @@ export default function ImpactPanel({ endpointId, endpointLabel, onClose }) {
             <p className="text-orange text-xs font-mono uppercase tracking-widest mb-1.5">
               Impact Analysis
             </p>
+            {functionName && (
+              <p className="font-mono text-xs text-alabaster-300 truncate">{functionName}</p>
+            )}
             <div className="flex items-center gap-2 flex-wrap">
               {method && (
                 <span
@@ -120,7 +114,9 @@ export default function ImpactPanel({ endpointId, endpointLabel, onClose }) {
               return (
                 <li key={i} className="bg-prussian-300 border border-prussian-600 rounded-md p-3">
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm font-medium text-white font-mono truncate">{c.service_name}</span>
+                    <span className="text-sm font-medium text-white font-mono truncate">
+                      {c.caller_function_name ?? 'unknown'} in {c.caller_file_path ?? 'unknown file'} ({c.service_name})
+                    </span>
                     <span className="text-xs font-mono text-alabaster-300 bg-prussian-400 px-1.5 py-0.5 rounded shrink-0 ml-2">
                       {c.source}
                     </span>

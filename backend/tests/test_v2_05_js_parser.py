@@ -22,28 +22,28 @@ def test_extract_js_routes_express_get_returns_correct_dict(tmp_path: pathlib.Pa
     f = tmp_path / "routes.js"
     f.write_text("app.get('/users', (req, res) => res.send('ok'));")
     result = extract_js_routes(str(f))
-    assert {"method": "GET", "path": "/users", "spec_source": "decorator_js"} in result
+    assert {"method": "GET", "path": "/users", "spec_source": "decorator_js", "function_name": None} in result
 
 
 def test_extract_js_routes_express_post(tmp_path: pathlib.Path):
     f = tmp_path / "routes.js"
     f.write_text("router.post('/orders', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "POST", "path": "/orders", "spec_source": "decorator_js"} in result
+    assert {"method": "POST", "path": "/orders", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_express_put(tmp_path: pathlib.Path):
     f = tmp_path / "routes.js"
     f.write_text("api.put('/items/:id', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "PUT", "path": "/items/:id", "spec_source": "decorator_js"} in result
+    assert {"method": "PUT", "path": "/items/:id", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_express_delete(tmp_path: pathlib.Path):
     f = tmp_path / "routes.js"
     f.write_text("v1.delete('/users/:id', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "DELETE", "path": "/users/:id", "spec_source": "decorator_js"} in result
+    assert {"method": "DELETE", "path": "/users/:id", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_express_method_stored_uppercase(tmp_path: pathlib.Path):
@@ -76,7 +76,7 @@ def test_extract_js_routes_express_arbitrary_object_name_accepted(tmp_path: path
     f = tmp_path / "routes.js"
     f.write_text("myCustomRouter.get('/ping', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "GET", "path": "/ping", "spec_source": "decorator_js"} in result
+    assert {"method": "GET", "path": "/ping", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_express_spec_source_is_decorator_js(tmp_path: pathlib.Path):
@@ -107,7 +107,7 @@ def test_extract_js_routes_express_ts_file(tmp_path: pathlib.Path):
     f = tmp_path / "routes.ts"
     f.write_text("app.get('/profile', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "GET", "path": "/profile", "spec_source": "decorator_js"} in result
+    assert {"method": "GET", "path": "/profile", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_express_jsx_file(tmp_path: pathlib.Path):
@@ -115,7 +115,7 @@ def test_extract_js_routes_express_jsx_file(tmp_path: pathlib.Path):
     f = tmp_path / "routes.jsx"
     f.write_text("server.post('/submit', handler);")
     result = extract_js_routes(str(f))
-    assert {"method": "POST", "path": "/submit", "spec_source": "decorator_js"} in result
+    assert {"method": "POST", "path": "/submit", "spec_source": "decorator_js", "function_name": "handler"} in result
 
 
 def test_extract_js_routes_no_routes_returns_empty(tmp_path: pathlib.Path):
@@ -149,7 +149,7 @@ def test_extract_js_routes_dict_has_required_keys(tmp_path: pathlib.Path):
     f.write_text("app.get('/x', handler);")
     result = extract_js_routes(str(f))
     assert len(result) == 1
-    assert set(result[0].keys()) == {"method", "path", "spec_source"}
+    assert set(result[0].keys()) == {"method", "path", "spec_source", "function_name"}
 
 
 # ─── extract_js_routes: Next.js App Router file-based routes ─────────────────
@@ -159,7 +159,7 @@ def test_extract_js_routes_nextjs_basic_get_route(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export async function GET(req) { return new Response('ok'); }")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/api/users", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/api/users", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_post_route(tmp_path: pathlib.Path):
@@ -167,7 +167,7 @@ def test_extract_js_routes_nextjs_post_route(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export async function POST(req) { return new Response('created', {status: 201}); }")
     result = extract_js_routes(str(route_file))
-    assert {"method": "POST", "path": "/api/users", "spec_source": "nextjs_route"} in result
+    assert {"method": "POST", "path": "/api/users", "spec_source": "nextjs_route", "function_name": "POST"} in result
 
 
 def test_extract_js_routes_nextjs_multiple_method_exports(tmp_path: pathlib.Path):
@@ -190,7 +190,7 @@ def test_extract_js_routes_nextjs_dynamic_segment_bracket_to_brace(tmp_path: pat
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/api/users/{id}", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/api/users/{id}", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_catch_all_segment(tmp_path: pathlib.Path):
@@ -199,7 +199,7 @@ def test_extract_js_routes_nextjs_catch_all_segment(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/api/{slug}", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/api/{slug}", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_root_api_path(tmp_path: pathlib.Path):
@@ -208,7 +208,7 @@ def test_extract_js_routes_nextjs_root_api_path(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/api", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/api", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_const_export_detected(tmp_path: pathlib.Path):
@@ -217,7 +217,7 @@ def test_extract_js_routes_nextjs_const_export_detected(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export const GET = async (req) => new Response('ok');")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/api/orders", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/api/orders", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_spec_source_is_nextjs_route(tmp_path: pathlib.Path):
@@ -234,7 +234,7 @@ def test_extract_js_routes_nextjs_tsx_route_file(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export async function DELETE(req: Request) { return new Response(); }")
     result = extract_js_routes(str(route_file))
-    assert {"method": "DELETE", "path": "/api/items", "spec_source": "nextjs_route"} in result
+    assert {"method": "DELETE", "path": "/api/items", "spec_source": "nextjs_route", "function_name": "DELETE"} in result
 
 
 def test_extract_js_routes_nextjs_non_route_basename_not_detected(tmp_path: pathlib.Path):
@@ -262,7 +262,7 @@ def test_extract_js_routes_nextjs_delete_method_export(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function DELETE(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "DELETE", "path": "/api/products/{id}", "spec_source": "nextjs_route"} in result
+    assert {"method": "DELETE", "path": "/api/products/{id}", "spec_source": "nextjs_route", "function_name": "DELETE"} in result
 
 
 def test_extract_js_routes_nextjs_put_method_export(tmp_path: pathlib.Path):
@@ -270,7 +270,7 @@ def test_extract_js_routes_nextjs_put_method_export(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function PUT(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "PUT", "path": "/api/products/{id}", "spec_source": "nextjs_route"} in result
+    assert {"method": "PUT", "path": "/api/products/{id}", "spec_source": "nextjs_route", "function_name": "PUT"} in result
 
 
 # ─── extract_js_routes: Next.js routes without /api/ prefix ─────────────────
@@ -281,7 +281,7 @@ def test_extract_js_routes_nextjs_app_root_route(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_non_api_prefix(tmp_path: pathlib.Path):
@@ -290,7 +290,7 @@ def test_extract_js_routes_nextjs_non_api_prefix(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/users", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/users", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_nested_non_api_path(tmp_path: pathlib.Path):
@@ -299,7 +299,7 @@ def test_extract_js_routes_nextjs_nested_non_api_path(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/dashboard/settings", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/dashboard/settings", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 def test_extract_js_routes_nextjs_dynamic_non_api_path(tmp_path: pathlib.Path):
@@ -308,7 +308,7 @@ def test_extract_js_routes_nextjs_dynamic_non_api_path(tmp_path: pathlib.Path):
     route_file.parent.mkdir(parents=True)
     route_file.write_text("export function GET(req) {}")
     result = extract_js_routes(str(route_file))
-    assert {"method": "GET", "path": "/posts/{id}", "spec_source": "nextjs_route"} in result
+    assert {"method": "GET", "path": "/posts/{id}", "spec_source": "nextjs_route", "function_name": "GET"} in result
 
 
 # ─── extract_js_http_calls: fetch() ─────────────────────────────────────────
@@ -317,14 +317,14 @@ def test_extract_js_http_calls_fetch_double_quoted(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('fetch("http://user-service/users/1");')
     result = extract_js_http_calls(str(f))
-    assert result == ["http://user-service/users/1"]
+    assert result == [{"url": "http://user-service/users/1", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_fetch_single_quoted(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text("fetch('http://payment-service/charge');")
     result = extract_js_http_calls(str(f))
-    assert result == ["http://payment-service/charge"]
+    assert result == [{"url": "http://payment-service/charge", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_fetch_template_literal_reconstructed(tmp_path: pathlib.Path):
@@ -332,7 +332,7 @@ def test_extract_js_http_calls_fetch_template_literal_reconstructed(tmp_path: pa
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\nfetch(`http://user-service/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == ["/users/{param}"]
+    assert result == [{"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_non_fetch_identifier_skipped(tmp_path: pathlib.Path):
@@ -357,28 +357,28 @@ def test_extract_js_http_calls_axios_get(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('axios.get("http://user-service/users/1");')
     result = extract_js_http_calls(str(f))
-    assert "http://user-service/users/1" in result
+    assert "http://user-service/users/1" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_axios_post(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('axios.post("http://order-service/orders");')
     result = extract_js_http_calls(str(f))
-    assert "http://order-service/orders" in result
+    assert "http://order-service/orders" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_axios_put(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('axios.put("http://svc/items/5");')
     result = extract_js_http_calls(str(f))
-    assert "http://svc/items/5" in result
+    assert "http://svc/items/5" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_axios_delete(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('axios.delete("http://svc/items/5");')
     result = extract_js_http_calls(str(f))
-    assert "http://svc/items/5" in result
+    assert "http://svc/items/5" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_axios_patch_skipped(tmp_path: pathlib.Path):
@@ -394,7 +394,7 @@ def test_extract_js_http_calls_axios_template_literal_reconstructed(tmp_path: pa
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\naxios.get(`http://svc/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == ["/users/{param}"]
+    assert result == [{"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_non_axios_lib_skipped(tmp_path: pathlib.Path):
@@ -415,18 +415,21 @@ def test_extract_js_http_calls_multiple_calls_all_captured(tmp_path: pathlib.Pat
         'axios.post("http://order-service/orders");\n'
     )
     result = extract_js_http_calls(str(f))
-    assert "http://user-service/users/1" in result
-    assert "http://payment-service/payments/2" in result
-    assert "http://order-service/orders" in result
+    urls = [c["url"] for c in result]
+    assert "http://user-service/users/1" in urls
+    assert "http://payment-service/payments/2" in urls
+    assert "http://order-service/orders" in urls
     assert len(result) == 3
 
 
-def test_extract_js_http_calls_returns_list_of_strings(tmp_path: pathlib.Path):
+def test_extract_js_http_calls_returns_list_of_dicts(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('fetch("http://svc/path");\naxios.get("http://svc/other");')
     result = extract_js_http_calls(str(f))
     assert isinstance(result, list)
-    assert all(isinstance(url, str) for url in result)
+    assert all(isinstance(c, dict) for c in result)
+    assert all(isinstance(c["url"], str) for c in result)
+    assert all(set(c.keys()) == {"url", "file_path", "caller_function_name"} for c in result)
 
 
 def test_extract_js_http_calls_ts_file_parsed_correctly(tmp_path: pathlib.Path):
@@ -434,14 +437,14 @@ def test_extract_js_http_calls_ts_file_parsed_correctly(tmp_path: pathlib.Path):
     f = tmp_path / "client.ts"
     f.write_text('fetch("http://user-service/users/1");')
     result = extract_js_http_calls(str(f))
-    assert "http://user-service/users/1" in result
+    assert "http://user-service/users/1" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_tsx_file_parsed_correctly(tmp_path: pathlib.Path):
     f = tmp_path / "client.tsx"
     f.write_text('axios.get("http://svc/data");')
     result = extract_js_http_calls(str(f))
-    assert "http://svc/data" in result
+    assert "http://svc/data" in [c["url"] for c in result]
 
 
 def test_extract_js_http_calls_no_http_calls_returns_empty(tmp_path: pathlib.Path):

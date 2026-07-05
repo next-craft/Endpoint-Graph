@@ -269,8 +269,9 @@ async def test_analyze_service_upsert_passes_repo_id_as_fifth_arg(tmp_path):
     assert call_args[5] == "myorg/myrepo"  # repo_id derived from URL
 
 
-async def test_analyze_endpoint_upsert_sql_has_on_conflict_do_nothing(tmp_path):
-    """Endpoint INSERT uses ON CONFLICT (service_id, method, path) DO NOTHING."""
+async def test_analyze_endpoint_upsert_sql_has_on_conflict_do_update(tmp_path):
+    """Endpoint INSERT uses ON CONFLICT (service_id, method, path) DO UPDATE, refreshing
+    file_path/function_name on re-analysis (spec v2-11)."""
     svc_dir = tmp_path / "my-service"
     svc_dir.mkdir()
     (svc_dir / "main.py").write_text("# service")
@@ -297,23 +298,22 @@ async def test_analyze_endpoint_upsert_sql_has_on_conflict_do_nothing(tmp_path):
     # Second fetchrow call is the endpoint upsert
     endpoint_sql = conn.fetchrow.call_args_list[1][0][0]
     assert "ON CONFLICT" in endpoint_sql
-    assert "DO NOTHING" in endpoint_sql
-    # Must NOT use DO UPDATE — endpoint definition is immutable on re-analysis
-    assert "DO UPDATE" not in endpoint_sql
+    assert "DO UPDATE" in endpoint_sql
+    assert "file_path" in endpoint_sql
+    assert "function_name" in endpoint_sql
 
 
-async def test_analyze_endpoint_fallback_select_issued_when_upsert_returns_none(tmp_path):
-    """When endpoint upsert returns None (DO NOTHING conflict), a fallback SELECT retrieves id."""
+async def test_analyze_endpoint_upsert_always_returns_a_row_no_fallback_needed(tmp_path):
+    """DO UPDATE ... RETURNING id always returns a row — no fallback SELECT branch exists (spec v2-11)."""
     svc_dir = tmp_path / "my-service"
     svc_dir.mkdir()
     (svc_dir / "main.py").write_text("# service")
 
     conn = AsyncMock()
-    # service upsert → row; endpoint upsert → None (conflict); fallback SELECT → existing row
+    # service upsert → row; endpoint upsert → row (DO UPDATE always returns via RETURNING id)
     conn.fetchrow = AsyncMock(side_effect=[
         _Row({"id": 1}),  # service upsert
-        None,             # endpoint upsert — DO NOTHING conflict path
-        _Row({"id": 7}),  # fallback SELECT
+        _Row({"id": 7}),  # endpoint upsert
     ])
     conn.fetch = AsyncMock(return_value=[])
     pool = _make_pool(conn)
@@ -332,12 +332,9 @@ async def test_analyze_endpoint_fallback_select_issued_when_upsert_returns_none(
             )
 
     assert resp.status_code == 200
-    # Route still reports 1 endpoint even though DO NOTHING was taken
     assert resp.json()["endpoints"] == 1
-    # Exactly 3 fetchrow calls: service upsert + endpoint upsert (None) + fallback SELECT
-    assert conn.fetchrow.call_count == 3
-    fallback_sql = conn.fetchrow.call_args_list[2][0][0]
-    assert "SELECT id FROM endpoints" in fallback_sql
+    # Exactly 2 fetchrow calls: service upsert + endpoint upsert — no fallback SELECT
+    assert conn.fetchrow.call_count == 2
 
 
 async def test_analyze_edge_upsert_sql_has_on_conflict_do_update_last_seen_at(tmp_path):

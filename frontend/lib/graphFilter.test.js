@@ -1,11 +1,11 @@
 import { filterGraph } from './graphFilter'
 
-const serviceNode = { id: 'service-1', data: { label: 'user-service' } }
-const endpointA   = { id: 'endpoint-1', data: { label: 'GET /users/{id}' } }
-const endpointB   = { id: 'endpoint-2', data: { label: 'POST /orders/create' } }
-const edge1 = { id: 'e1', source: 'service-1', target: 'endpoint-1' }
-const edge2 = { id: 'e2', source: 'service-1', target: 'endpoint-2' }
-const nodes = [serviceNode, endpointA, endpointB]
+const callerNode  = { id: 'caller-1', node_type: 'caller', label: 'user-service' }
+const endpointA   = { id: 'ep:1', node_type: 'endpoint', label: 'GET /users/{id}' }
+const endpointB   = { id: 'ep:2', node_type: 'endpoint', label: 'POST /orders/create' }
+const edge1 = { id: 'e1', source: 'caller-1', target: 'ep:1' }
+const edge2 = { id: 'e2', source: 'caller-1', target: 'ep:2' }
+const nodes = [callerNode, endpointA, endpointB]
 const edges = [edge1, edge2]
 
 test('empty_query_returns_all_nodes_and_edges', () => {
@@ -20,9 +20,9 @@ test('whitespace_only_query_returns_all_nodes_and_edges', () => {
   expect(visibleEdges).toHaveLength(2)
 })
 
-test('matching_query_keeps_matching_endpoint_and_all_service_nodes', () => {
+test('matching_query_keeps_matching_endpoint_and_all_non_endpoint_nodes', () => {
   const { visibleNodes } = filterGraph(nodes, edges, 'users')
-  expect(visibleNodes).toContain(serviceNode)
+  expect(visibleNodes).toContain(callerNode)
   expect(visibleNodes).toContain(endpointA)
   expect(visibleNodes).not.toContain(endpointB)
 })
@@ -30,7 +30,7 @@ test('matching_query_keeps_matching_endpoint_and_all_service_nodes', () => {
 test('non_matching_endpoint_nodes_are_hidden', () => {
   const { visibleNodes } = filterGraph(nodes, edges, 'payments')
   expect(visibleNodes).toHaveLength(1)
-  expect(visibleNodes[0]).toBe(serviceNode)
+  expect(visibleNodes[0]).toBe(callerNode)
 })
 
 test('edges_to_hidden_endpoint_nodes_are_removed', () => {
