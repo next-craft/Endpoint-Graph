@@ -123,10 +123,37 @@ def test_extract_multiple_calls(tmp_path):
     assert {"url": "http://order-service/orders"} in result
 
 
-def test_extract_fstring_url_skipped(tmp_path):
+def test_extract_fstring_url_reconstructed(tmp_path):
     f = tmp_path / "client.py"
     f.write_text('import requests\nuser_id = 1\nresp = requests.get(f"http://svc/users/{user_id}")\n')
+    assert extract_http_calls(str(f)) == [{"url": "/users/{param}"}]
+
+
+def test_requests_get_fstring_host(tmp_path):
+    f = tmp_path / "client.py"
+    f.write_text('import requests\nHOST = "svc"\nresp = requests.get(f"http://{HOST}/users")\n')
+    assert extract_http_calls(str(f)) == [{"url": "/users"}]
+
+
+def test_requests_get_fstring_path_segment(tmp_path):
+    f = tmp_path / "client.py"
+    f.write_text('import requests\nuser_id = 1\nresp = requests.get(f"http://svc/users/{user_id}")\n')
+    assert extract_http_calls(str(f)) == [{"url": "/users/{param}"}]
+
+
+def test_requests_get_fstring_no_path_skipped(tmp_path):
+    f = tmp_path / "client.py"
+    f.write_text('import requests\nHOST = "svc"\nresp = requests.get(f"http://{HOST}")\n')
     assert extract_http_calls(str(f)) == []
+
+
+def test_requests_get_fstring_multiple_substitutions(tmp_path):
+    f = tmp_path / "client.py"
+    f.write_text(
+        'import requests\nuser_id = 1\norder_id = 2\n'
+        'resp = requests.get(f"http://svc/users/{user_id}/orders/{order_id}")\n'
+    )
+    assert extract_http_calls(str(f)) == [{"url": "/users/{param}/orders/{param}"}]
 
 
 def test_extract_variable_url_skipped(tmp_path):
@@ -288,11 +315,86 @@ def test_js_axios_delete(tmp_path):
     assert "http://svc/items/1" in result
 
 
-def test_js_fetch_template_literal_skipped(tmp_path):
+def test_js_fetch_template_literal_reconstructed(tmp_path):
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\nfetch(`http://svc/users/${id}`);\n")
     result = extract_js_http_calls(str(f))
+    assert result == ["/users/{param}"]
+
+
+def test_js_fetch_template_env_host_static_path(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text("const API_HOST = process.env.API_HOST;\nfetch(`${API_HOST}/users`);\n")
+    result = extract_js_http_calls(str(f))
+    assert result == ["/users"]
+
+
+def test_js_fetch_template_dynamic_path_segment(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text("const id = 1;\nfetch(`/users/${id}`);\n")
+    result = extract_js_http_calls(str(f))
+    assert result == ["/users/{param}"]
+
+
+def test_js_axios_get_template_literal(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text("const id = 1;\naxios.get(`http://svc/users/${id}`);\n")
+    result = extract_js_http_calls(str(f))
+    assert "/users/{param}" in result
+
+
+def test_js_fetch_template_no_path_skipped(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text("const API_HOST = process.env.API_HOST;\nfetch(`${API_HOST}`);\n")
+    result = extract_js_http_calls(str(f))
     assert result == []
+
+
+def test_js_fetch_template_multiple_substitutions(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text(
+        "const id = 1;\nconst orderId = 2;\n"
+        "fetch(`/users/${id}/orders/${orderId}`);\n"
+    )
+    result = extract_js_http_calls(str(f))
+    assert result == ["/users/{param}/orders/{param}"]
+
+
+def test_js_fetch_template_no_substitutions(tmp_path):
+    f = tmp_path / "client.js"
+    f.write_text("fetch(`/users`);\n")
+    result = extract_js_http_calls(str(f))
+    assert result == ["/users"]
+
+
+def test_ts_fetch_template_literal(tmp_path):
+    f = tmp_path / "client.ts"
+    f.write_text("const id = 1;\nfetch(`http://svc/users/${id}`);\n")
+    result = extract_js_http_calls(str(f))
+    assert result == ["/users/{param}"]
+
+
+def test_js_fetch_template_path_with_embedded_scheme_not_truncated(tmp_path):
+    # The reconstructed pattern has no scheme of its own (starts with "/"), but
+    # its path contains an embedded "://" (e.g. a redirect target). Scheme
+    # detection must be anchored to the start of the pattern, not match this.
+    f = tmp_path / "client.js"
+    f.write_text("fetch(`/redirect?to=https://other/x`);\n")
+    result = extract_js_http_calls(str(f))
+    assert result == ["/redirect?to=https://other/x"]
+
+
+def test_js_template_literal_invalid_utf8_does_not_blank_file(tmp_path):
+    # A malformed byte sequence inside one template literal's static text must
+    # not raise UnicodeDecodeError and wipe out other valid calls in the file.
+    f = tmp_path / "client.js"
+    f.write_bytes(
+        b'fetch("http://user-service/users/1");\n'
+        b"const id = 1;\n"
+        b"fetch(`/users/" + b"\xff\xfe" + b"/${id}`);\n"
+    )
+    result = extract_js_http_calls(str(f))
+    assert "http://user-service/users/1" in result
 
 
 def test_js_fetch_variable_url_skipped(tmp_path):

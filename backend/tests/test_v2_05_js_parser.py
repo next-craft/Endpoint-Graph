@@ -327,12 +327,12 @@ def test_extract_js_http_calls_fetch_single_quoted(tmp_path: pathlib.Path):
     assert result == ["http://payment-service/charge"]
 
 
-def test_extract_js_http_calls_fetch_template_literal_skipped(tmp_path: pathlib.Path):
-    # Template literals start with backtick — must be excluded
+def test_extract_js_http_calls_fetch_template_literal_reconstructed(tmp_path: pathlib.Path):
+    # Template literals are reconstructed into a {param}-bearing path (spec v2-10)
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\nfetch(`http://user-service/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == []
+    assert result == ["/users/{param}"]
 
 
 def test_extract_js_http_calls_non_fetch_identifier_skipped(tmp_path: pathlib.Path):
@@ -389,11 +389,12 @@ def test_extract_js_http_calls_axios_patch_skipped(tmp_path: pathlib.Path):
     assert result == []
 
 
-def test_extract_js_http_calls_axios_template_literal_skipped(tmp_path: pathlib.Path):
+def test_extract_js_http_calls_axios_template_literal_reconstructed(tmp_path: pathlib.Path):
+    # Template literals are reconstructed into a {param}-bearing path (spec v2-10)
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\naxios.get(`http://svc/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == []
+    assert result == ["/users/{param}"]
 
 
 def test_extract_js_http_calls_non_axios_lib_skipped(tmp_path: pathlib.Path):
