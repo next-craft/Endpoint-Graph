@@ -55,12 +55,12 @@ def test_extract_js_routes_express_method_stored_uppercase(tmp_path: pathlib.Pat
     assert result[0]["method"] == "GET"
 
 
-def test_extract_js_routes_express_patch_not_included(tmp_path: pathlib.Path):
-    # PATCH is not in the tracked method set {GET, POST, PUT, DELETE}
+def test_extract_js_routes_express_patch_included(tmp_path: pathlib.Path):
+    # PATCH is in the tracked method set {GET, POST, PUT, DELETE, PATCH}
     f = tmp_path / "routes.js"
     f.write_text("app.patch('/x', handler);")
     result = extract_js_routes(str(f))
-    assert result == []
+    assert result[0]["method"] == "PATCH"
 
 
 def test_extract_js_routes_express_template_literal_path_skipped(tmp_path: pathlib.Path):
@@ -317,14 +317,14 @@ def test_extract_js_http_calls_fetch_double_quoted(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text('fetch("http://user-service/users/1");')
     result = extract_js_http_calls(str(f))
-    assert result == [{"url": "http://user-service/users/1", "file_path": str(f), "caller_function_name": None}]
+    assert result == [{"url": "http://user-service/users/1", "method": "GET", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_fetch_single_quoted(tmp_path: pathlib.Path):
     f = tmp_path / "client.js"
     f.write_text("fetch('http://payment-service/charge');")
     result = extract_js_http_calls(str(f))
-    assert result == [{"url": "http://payment-service/charge", "file_path": str(f), "caller_function_name": None}]
+    assert result == [{"url": "http://payment-service/charge", "method": "GET", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_fetch_template_literal_reconstructed(tmp_path: pathlib.Path):
@@ -332,7 +332,7 @@ def test_extract_js_http_calls_fetch_template_literal_reconstructed(tmp_path: pa
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\nfetch(`http://user-service/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == [{"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}]
+    assert result == [{"url": "/users/{param}", "method": "GET", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_non_fetch_identifier_skipped(tmp_path: pathlib.Path):
@@ -381,12 +381,13 @@ def test_extract_js_http_calls_axios_delete(tmp_path: pathlib.Path):
     assert "http://svc/items/5" in [c["url"] for c in result]
 
 
-def test_extract_js_http_calls_axios_patch_skipped(tmp_path: pathlib.Path):
-    # PATCH is not in the allowed set {"get", "post", "put", "delete"}
+def test_extract_js_http_calls_axios_patch_included(tmp_path: pathlib.Path):
+    # PATCH is in the allowed set {"get", "post", "put", "delete", "patch"}
     f = tmp_path / "client.js"
     f.write_text('axios.patch("http://svc/items/5");')
     result = extract_js_http_calls(str(f))
-    assert result == []
+    assert "http://svc/items/5" in [c["url"] for c in result]
+    assert result[0]["method"] == "PATCH"
 
 
 def test_extract_js_http_calls_axios_template_literal_reconstructed(tmp_path: pathlib.Path):
@@ -394,7 +395,7 @@ def test_extract_js_http_calls_axios_template_literal_reconstructed(tmp_path: pa
     f = tmp_path / "client.js"
     f.write_text("const id = 1;\naxios.get(`http://svc/users/${id}`);")
     result = extract_js_http_calls(str(f))
-    assert result == [{"url": "/users/{param}", "file_path": str(f), "caller_function_name": None}]
+    assert result == [{"url": "/users/{param}", "method": "GET", "file_path": str(f), "caller_function_name": None}]
 
 
 def test_extract_js_http_calls_non_axios_lib_skipped(tmp_path: pathlib.Path):
@@ -429,7 +430,7 @@ def test_extract_js_http_calls_returns_list_of_dicts(tmp_path: pathlib.Path):
     assert isinstance(result, list)
     assert all(isinstance(c, dict) for c in result)
     assert all(isinstance(c["url"], str) for c in result)
-    assert all(set(c.keys()) == {"url", "file_path", "caller_function_name"} for c in result)
+    assert all(set(c.keys()) == {"url", "method", "file_path", "caller_function_name"} for c in result)
 
 
 def test_extract_js_http_calls_ts_file_parsed_correctly(tmp_path: pathlib.Path):
