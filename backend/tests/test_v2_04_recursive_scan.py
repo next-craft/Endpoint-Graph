@@ -126,18 +126,24 @@ def test_file_path_as_root_returns_empty(tmp_path: pathlib.Path):
     result = find_service_folders(str(f))
     assert result == []
 
-def test_root_itself_never_in_results(tmp_path: pathlib.Path):
-    # Even if root contains SERVICE_MARKERS, root is not a subdirectory of itself
+def test_root_itself_is_a_service_when_markers_live_there(tmp_path: pathlib.Path):
+    # A single-service monolith repo (e.g. package.json at the repo root, no
+    # services/ subfolder) must itself be detected as a service folder --
+    # otherwise root-level monoliths can never be tracked at all (discovered
+    # via v2-open-issues.md issue 8's airbnb-clone repro).
     (tmp_path / 'main.py').touch()
     result = find_service_folders(str(tmp_path))
-    assert str(tmp_path) not in result
+    assert result == [str(tmp_path)]
 
-def test_files_at_root_level_not_treated_as_services(tmp_path: pathlib.Path):
-    # Files directly inside root are not directories — must be skipped
-    (tmp_path / 'main.py').touch()
-    (tmp_path / 'app.py').touch()
+def test_walk_skips_loose_files_without_crashing(tmp_path: pathlib.Path):
+    # A loose non-marker file alongside a real service subdirectory must not
+    # be mistaken for a directory to recurse into (os.path.isdir guard),
+    # and must not stop the real service from being found.
+    (tmp_path / 'README.md').touch()
+    (tmp_path / 'svc').mkdir()
+    (tmp_path / 'svc' / 'main.py').touch()
     result = find_service_folders(str(tmp_path))
-    assert result == []
+    assert result == [str(tmp_path / 'svc')]
 
 def test_empty_root_returns_empty(tmp_path: pathlib.Path):
     result = find_service_folders(str(tmp_path))
@@ -186,6 +192,24 @@ def test_non_service_dir_is_recursed_into(tmp_path: pathlib.Path):
     assert str(tmp_path / 'monorepo' / 'services' / 'api') in result
     assert str(tmp_path / 'monorepo') not in result
     assert str(tmp_path / 'monorepo' / 'services') not in result
+
+
+# ── find_service_folders: single-service monolith at repo root ───────────────
+
+def test_single_service_monolith_with_subfolders_is_found_once(tmp_path: pathlib.Path):
+    # Reproduces the real airbnb-clone repo shape from v2-open-issues.md
+    # issue 8: package.json at the repo root, with plain (non-service)
+    # subfolders like routes/ and controller/ alongside it. The whole repo
+    # must be returned as exactly one service -- the root -- and none of its
+    # subfolders should also show up as separate services.
+    (tmp_path / 'package.json').touch()
+    (tmp_path / 'app.js').touch()
+    (tmp_path / 'routes').mkdir()
+    (tmp_path / 'routes' / 'authRouter.js').touch()
+    (tmp_path / 'controller').mkdir()
+    (tmp_path / 'controller' / 'authController.js').touch()
+    result = find_service_folders(str(tmp_path))
+    assert result == [str(tmp_path)]
 
 
 # ── find_service_folders: multi-service and depth scenarios ──────────────────
