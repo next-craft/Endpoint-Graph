@@ -103,10 +103,15 @@ def _make_pool(conn):
     return pool
 
 
-def _conn_returning(rows):
-    """conn.fetch() is called exactly once in get_graph (the single joined query)."""
+def _conn_returning(rows, service_count=0, endpoint_count=0):
+    """conn.fetch() is called exactly once in get_graph (the single joined
+    query); conn.fetchrow() is called once for the service_count/endpoint_count
+    companion query (v2-open-issues.md issue 8)."""
     conn = AsyncMock()
     conn.fetch = AsyncMock(return_value=rows)
+    conn.fetchrow = AsyncMock(
+        return_value=_Row({"service_count": service_count, "endpoint_count": endpoint_count})
+    )
     conn.execute = AsyncMock()
     return conn
 
@@ -123,7 +128,7 @@ async def _request(repo_id="acme/sample-services", headers=None, params_override
 # ---------------------------------------------------------------------------
 
 async def test_get_graph_returns_endpoint_and_caller_nodes_with_edges():
-    conn = _conn_returning([_EDGE_ORDER_TO_USER])
+    conn = _conn_returning([_EDGE_ORDER_TO_USER], service_count=2, endpoint_count=3)
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -147,6 +152,9 @@ async def test_get_graph_returns_endpoint_and_caller_nodes_with_edges():
     assert edge["source"] == caller_node["id"]
     assert edge["target"] == "ep:10"
     assert edge["call_count"] == 5
+
+    assert body["service_count"] == 2
+    assert body["endpoint_count"] == 3
 
 
 async def test_get_graph_sets_rls_context_with_authenticated_user_before_fetching():
@@ -173,7 +181,11 @@ async def test_get_graph_sets_rls_context_with_authenticated_user_before_fetchin
 # ---------------------------------------------------------------------------
 
 async def test_get_graph_repo_with_no_tracked_services_returns_empty_graph():
-    conn = _conn_returning([])
+    """service_count/endpoint_count are also 0 here -- this is what lets the
+    frontend distinguish "never tracked" from the monolith case below, where
+    nodes/edges are equally empty but the repo genuinely was tracked
+    (v2-open-issues.md issue 8)."""
+    conn = _conn_returning([], service_count=0, endpoint_count=0)
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -184,15 +196,20 @@ async def test_get_graph_repo_with_no_tracked_services_returns_empty_graph():
     body = resp.json()
     assert body["nodes"] == []
     assert body["edges"] == []
+    assert body["service_count"] == 0
+    assert body["endpoint_count"] == 0
 
 
 async def test_get_graph_services_with_no_consumer_edges_yield_no_nodes():
     """A repo can have tracked services with no recorded consumer_edges yet
-    (e.g. right after Track, before any caller relationship is discovered).
-    Per spec v2-11, node identity only exists via consumer_edges rows -- a
-    service that neither calls nor is called yields zero nodes, not a
-    standalone service-level node (that concept no longer exists)."""
-    conn = _conn_returning([])
+    (e.g. right after Track, before any caller relationship is discovered, or
+    a single-service monolith that can never have edges -- analyze.py excludes
+    self-calls). Per spec v2-11, node identity only exists via consumer_edges
+    rows -- a service that neither calls nor is called yields zero nodes, not
+    a standalone service-level node (that concept no longer exists). But
+    service_count/endpoint_count must still reflect that the repo IS tracked
+    (v2-open-issues.md issue 8), unlike the never-tracked case above."""
+    conn = _conn_returning([], service_count=1, endpoint_count=6)
     pool = _make_pool(conn)
 
     with patch("routers.graph.get_pool", new_callable=AsyncMock) as mock_gp:
@@ -203,6 +220,8 @@ async def test_get_graph_services_with_no_consumer_edges_yield_no_nodes():
     body = resp.json()
     assert body["nodes"] == []
     assert body["edges"] == []
+    assert body["service_count"] == 1
+    assert body["endpoint_count"] == 6
 
 
 async def test_get_graph_repo_id_with_special_characters_forwarded_unchanged():
@@ -219,6 +238,7 @@ async def test_get_graph_repo_id_with_special_characters_forwarded_unchanged():
     assert resp.status_code == 200
     assert conn.fetch.call_count == 1
     assert conn.fetch.call_args.args[-1] == tricky_repo_id
+    assert conn.fetchrow.call_args.args[-1] == tricky_repo_id
 
 
 # ---------------------------------------------------------------------------

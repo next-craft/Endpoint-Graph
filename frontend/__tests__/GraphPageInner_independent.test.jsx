@@ -213,6 +213,20 @@ describe('GraphPageInner - edge cases', () => {
     expect(screen.queryByTestId('dependency-graph')).not.toBeInTheDocument()
   })
 
+  test('shows a distinct message for a tracked single-service monolith with zero cross-service edges (v2-open-issues.md issue 8)', async () => {
+    mockSearchParamsGet.mockReturnValue('acme/airbnb-clone')
+    fetchGraph.mockResolvedValue({ nodes: [], edges: [], service_count: 1, endpoint_count: 6 })
+
+    render(<GraphPageInner />)
+
+    const message = await screen.findByText(/tracked service/i)
+    expect(message.textContent).toContain('acme/airbnb-clone')
+    expect(message.textContent).toContain('1 tracked service')
+    expect(message.textContent).toContain('6')
+    expect(message.textContent).not.toMatch(/no tracked services yet/i)
+    expect(screen.queryByTestId('dependency-graph')).not.toBeInTheDocument()
+  })
+
   test('shows a loading indicator while the graph request is in flight, then hides it', async () => {
     mockSearchParamsGet.mockReturnValue('acme/sample-services')
     let resolveFetch

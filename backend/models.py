@@ -62,6 +62,8 @@ class GraphEdge(BaseModel):
 class GraphOut(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    service_count: int
+    endpoint_count: int
 
 
 class RepoOut(BaseModel):

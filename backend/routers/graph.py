@@ -25,6 +25,17 @@ JOIN services es  ON es.id = e.service_id
 WHERE cs.repo_id = $1
 """
 
+# consumer_edges only ever yields rows for cross-service calls (analyze.py
+# excludes self-calls), so a tracked single-service monolith always has zero
+# edges. These counts let the frontend tell "not tracked" apart from "tracked,
+# just no cross-service callers" even though GRAPH_QUERY returns no rows for
+# either case.
+COUNTS_QUERY = """
+SELECT
+  (SELECT COUNT(*) FROM services WHERE repo_id = $1) AS service_count,
+  (SELECT COUNT(*) FROM endpoints e JOIN services s ON s.id = e.service_id WHERE s.repo_id = $1) AS endpoint_count
+"""
+
 
 @router.get("/graph", response_model=GraphOut)
 async def get_graph(
@@ -37,6 +48,7 @@ async def get_graph(
         async with conn.transaction():
             await set_rls_context(conn, user_id)
             rows = await conn.fetch(GRAPH_QUERY, repo_id)
+            counts_row = await conn.fetchrow(COUNTS_QUERY, repo_id)
 
     endpoint_nodes: dict[str, GraphNode] = {}
     caller_nodes: dict[str, GraphNode] = {}
@@ -84,4 +96,6 @@ async def get_graph(
     return GraphOut(
         nodes=list(endpoint_nodes.values()) + list(caller_nodes.values()),
         edges=edges,
+        service_count=counts_row["service_count"],
+        endpoint_count=counts_row["endpoint_count"],
     )

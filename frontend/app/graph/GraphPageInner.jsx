@@ -28,28 +28,31 @@ function NetworkLogo() {
   )
 }
 
-function EmptyState({ hasRepo }) {
+// service_count/endpoint_count come from GET /graph regardless of whether any
+// consumer_edges exist, so "never tracked" (both 0) can be told apart from
+// "tracked but zero cross-service callers" (e.g. a single-service monolith --
+// analyze.py's self-call exclusion means it can never have edges to itself).
+function emptyStateMessage(repoId, serviceCount, endpointCount) {
+  if (!repoId) return 'No repo selected — go to /repos and track one.'
+  if (serviceCount > 0) {
+    const serviceLabel = serviceCount === 1 ? 'service' : 'services'
+    const endpointLabel = endpointCount === 1 ? 'endpoint' : 'endpoints'
+    return `${repoId} has ${serviceCount} tracked ${serviceLabel} and ${endpointCount} ` +
+      `tracked ${endpointLabel}, but no other tracked service calls them — this tool tracks ` +
+      `cross-service consumers, not a single service's own routes.`
+  }
+  return 'This repo has no tracked services yet.'
+}
+
+function EmptyState({ repoId, serviceCount, endpointCount }) {
   return (
     <div className="flex flex-col items-center justify-center h-full gap-6 select-none">
       <NetworkLogo />
-      <div className="text-center">
+      <div className="text-center max-w-md px-4">
         <p className="text-alabaster-300 text-sm font-mono mb-1">No graph loaded</p>
         <p className="text-alabaster-200 text-xs">
-          {hasRepo
-            ? 'This repo has no tracked services yet.'
-            : 'No repo selected — go to /repos and track one.'}
+          {emptyStateMessage(repoId, serviceCount, endpointCount)}
         </p>
-      </div>
-      <div className="flex gap-3">
-        {['user-service', 'order-service', 'payment-service'].map((name) => (
-          <div
-            key={name}
-            className="border border-prussian-600 rounded px-3 py-2 text-xs font-mono text-alabaster-200"
-            style={{ background: '#14213d' }}
-          >
-            {name}
-          </div>
-        ))}
       </div>
     </div>
   )
@@ -61,6 +64,8 @@ export default function GraphPageInner() {
 
   const [nodes, setNodes] = useState([])
   const [edges, setEdges] = useState([])
+  const [serviceCount, setServiceCount] = useState(0)
+  const [endpointCount, setEndpointCount] = useState(0)
   const [graphLoading, setGraphLoading] = useState(false)
   const [graphError, setGraphError] = useState(null)
   const [selectedEndpoint, setSelectedEndpoint] = useState(null)
@@ -74,6 +79,8 @@ export default function GraphPageInner() {
     if (!repoId) {
       setNodes([])
       setEdges([])
+      setServiceCount(0)
+      setEndpointCount(0)
       setGraphLoading(false)
       return
     }
@@ -87,6 +94,8 @@ export default function GraphPageInner() {
         if (cancelled) return
         setNodes(graphData.nodes)
         setEdges(graphData.edges)
+        setServiceCount(graphData.service_count ?? 0)
+        setEndpointCount(graphData.endpoint_count ?? 0)
       } catch (err) {
         if (!cancelled) setGraphError(err.message)
       } finally {
@@ -177,7 +186,9 @@ export default function GraphPageInner() {
             </div>
           )}
 
-          {!graphLoading && nodes.length === 0 && <EmptyState hasRepo={Boolean(repoId)} />}
+          {!graphLoading && nodes.length === 0 && (
+            <EmptyState repoId={repoId} serviceCount={serviceCount} endpointCount={endpointCount} />
+          )}
 
           {nodes.length > 0 && (
             <DependencyGraph
