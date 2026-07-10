@@ -102,6 +102,7 @@ agents/
 | Frontend language | JavaScript | ES2022 | No TypeScript — all .js and .jsx files |
 | Styling | Tailwind CSS | v4.3 | Utility-first CSS, CSS-first config |
 | Graph visualization | React Flow | @xyflow/react latest | Interactive dependency graph |
+| Graph auto-layout | dagre | @dagrejs/dagre ^3.0.0 | Auto-layout for the 3-level service/file/endpoint graph hierarchy |
 | Auth (frontend) | Supabase JS client | v2 | GitHub OAuth only — not for DB queries |
 | Auth (backend) | PyJWT + cryptography | latest | Verify Supabase ES256 JWT via JWKS, extract user_id |
 | Backend framework | FastAPI | latest | REST API + analysis engine |
@@ -268,7 +269,7 @@ CREATE TABLE public.services (
 CREATE TABLE public.endpoints (
   id            SERIAL PRIMARY KEY,
   service_id    INT NOT NULL REFERENCES public.services(id) ON DELETE CASCADE,
-  method        VARCHAR(10) NOT NULL,    -- GET | POST | PUT | DELETE
+  method        VARCHAR(10) NOT NULL,    -- GET | POST | PUT | DELETE | PATCH
   path          VARCHAR(255) NOT NULL,   -- /users/{id}
   spec_source   VARCHAR(50),            -- openapi | decorator | decorator_js | nextjs_route
   file_path     VARCHAR(500),           -- relative path within service root, e.g. routers/users.py
@@ -291,7 +292,7 @@ CREATE TABLE public.consumer_edges (
   caller_file_path     VARCHAR(500),           -- relative path within caller service, e.g. lib/api.js
   caller_function_name VARCHAR(255),           -- enclosing function name, e.g. fetchUser
   created_at           TIMESTAMP DEFAULT NOW(),
-  UNIQUE(caller_service_id, endpoint_id)
+  UNIQUE(caller_service_id, endpoint_id, caller_file_path, caller_function_name)
 );
 ```
 
@@ -401,6 +402,8 @@ async function getAuthHeaders() {
 }
 ```
 
+**Note:** `session.provider_token` is only guaranteed present right after the initial OAuth callback — Supabase drops it from the session on later background access-token refreshes. `lib/githubToken.js` captures it once in `sessionStorage` at `/auth/callback` (and opportunistically whenever `getAuthHeaders` sees it), so `getAuthHeaders` falls back to the stored copy instead of throwing "Session expired" the first time a refresh has happened. The stored copy is cleared on logout (`handleLogout` in `GraphPageInner.jsx`).
+
 No inline `fetch()` in components or pages — every call goes through `lib/api.js`.
 
 ### Backend JWT verification + RLS context
@@ -487,7 +490,7 @@ All routes require both headers: `X-GitHub-Token` and `Authorization: Bearer <su
 | Method | Route | Request body / params | Returns |
 |---|---|---|---|
 | POST | `/analyze` | `{repo_url: string}` | `{status: "ok", services: int, endpoints: int, edges: int}` |
-| GET | `/graph` | `?repo_id=owner/name` | `{nodes: [...], edges: [...]}` |
+| GET | `/graph` | `?repo_id=owner/name` | `{nodes: [...], edges: [...], service_count: int, endpoint_count: int}` |
 | GET | `/repos` | — | `[{name, full_name, private, updated_at, tracked, last_analyzed_at, service_id}]` |
 | GET | `/services` | — | `[{id, name, language, repo_url, repo_id, last_analyzed_at}]` |
 | DELETE | `/services/{id}` | — | `{status: "deleted"}` |
@@ -564,6 +567,12 @@ class GraphEdge(BaseModel):
 class GraphOut(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+    service_count: int   # tracked services for this repo_id, regardless of edges
+    endpoint_count: int  # tracked endpoints for this repo_id, regardless of edges
+    # service_count/endpoint_count let the frontend distinguish "never tracked"
+    # (both 0) from "tracked but zero cross-service callers" (nodes/edges empty,
+    # counts > 0 -- e.g. a single-service monolith, since analyze.py's self-call
+    # exclusion means it can never have edges to itself).
 ```
 
 ---
@@ -585,12 +594,14 @@ ON CONFLICT (service_id, method, path)
 DO UPDATE SET file_path = EXCLUDED.file_path, function_name = EXCLUDED.function_name
 RETURNING id;
 
--- Upsert edge (on re-analysis, update timestamp and caller context)
+-- Upsert edge (on re-analysis, update timestamp and caller context; call_count
+-- increments each time the edge is re-confirmed rather than staying fixed at 1)
 INSERT INTO consumer_edges
   (caller_service_id, endpoint_id, last_seen_at, call_count, source, caller_file_path, caller_function_name)
 VALUES ($1, $2, NOW(), 1, $3, $4, $5)
-ON CONFLICT (caller_service_id, endpoint_id)
-DO UPDATE SET last_seen_at = NOW(), source = EXCLUDED.source,
+ON CONFLICT (caller_service_id, endpoint_id, caller_file_path, caller_function_name)
+DO UPDATE SET call_count = consumer_edges.call_count + 1,
+              last_seen_at = NOW(), source = EXCLUDED.source,
               caller_file_path = EXCLUDED.caller_file_path,
               caller_function_name = EXCLUDED.caller_function_name;
 
@@ -613,6 +624,14 @@ JOIN services cs ON cs.id = ce.caller_service_id
 JOIN endpoints e  ON e.id  = ce.endpoint_id
 JOIN services es  ON es.id = e.service_id
 WHERE cs.repo_id = $1;
+
+-- Graph: service_count/endpoint_count for the same repo_id, regardless of
+-- edges -- lets GraphPageInner.jsx tell "never tracked" apart from "tracked,
+-- zero cross-service callers" even though the query above returns no rows
+-- for either case.
+SELECT
+  (SELECT COUNT(*) FROM services WHERE repo_id = $1) AS service_count,
+  (SELECT COUNT(*) FROM endpoints e JOIN services s ON s.id = e.service_id WHERE s.repo_id = $1) AS endpoint_count;
 
 -- Impact analysis: who calls endpoint X (with file + function detail)
 SELECT s.name AS service_name, ce.caller_function_name, ce.caller_file_path,
@@ -805,12 +824,12 @@ The `function_name` column on `endpoints` and `caller_function_name` column on `
 - [x] Upsert services + endpoints on re-analysis (no duplicate rows)
 - [x] Recursive service discovery — full depth, `IGNORED_DIRS` only
 - [x] JS/TS parser — extend `code_parser.py` for `.js`, `.jsx`, `.ts`, `.tsx`
-- [ ] `GET /repos` — proxy GitHub repo list, annotate with `tracked` + `last_analyzed_at` + `service_id`
-- [ ] Frontend `/repos` page — repo browser with Track / Re-analyze / Untrack buttons
-- [ ] `GET /graph?repo_id=...` scoped per repo + user; graph persists on page refresh
-- [ ] `DELETE /services/{id}` — untrack a repo
-- [ ] Template literal and f-string URL detection — extract paths from dynamic host + static path patterns
-- [ ] Endpoint-level graph nodes — function_name + file_path columns, 3-level React Flow layout (service → file → endpoint/caller)
+- [x] `GET /repos` — proxy GitHub repo list, annotate with `tracked` + `last_analyzed_at` + `service_id`
+- [x] Frontend `/repos` page — repo browser with Track / Re-analyze / Untrack buttons
+- [x] `GET /graph?repo_id=...` scoped per repo + user; graph persists on page refresh
+- [x] `DELETE /services/{id}` — untrack a repo
+- [x] Template literal and f-string URL detection — extract paths from dynamic host + static path patterns
+- [x] Endpoint-level graph nodes — function_name + file_path columns, 3-level React Flow layout (service → file → endpoint/caller) (spec v2-11 — implemented and tested; merge `feat/v2-11-endpoint-nodes` to `main` to finalize)
 
 ### Not in v2 — do not implement
 - [ ] Field-level impact analysis (v3)
