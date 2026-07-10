@@ -191,7 +191,6 @@ async def analyze(
             {"id": r["id"], "method": r["method"], "path": r["path"], "service_id": r["service_id"]}
             for r in rows
         ]
-        known_paths = [e["path"] for e in known_endpoints]
 
         async with pool.acquire() as conn:
             async with conn.transaction():
@@ -207,11 +206,12 @@ async def analyze(
                             url_path = _extract_path(call["url"])
                             if not url_path:
                                 continue
-                            matched_path = match_url_to_endpoint(url_path, known_paths)
+                            candidates = [e for e in known_endpoints if e["method"] == call.get("method")]
+                            matched_path = match_url_to_endpoint(url_path, [e["path"] for e in candidates])
                             if matched_path is None:
                                 continue
                             matched_endpoint = next(
-                                (e for e in known_endpoints if e["path"] == matched_path), None
+                                (e for e in candidates if e["path"] == matched_path), None
                             )
                             if matched_endpoint is None or matched_endpoint["service_id"] == service_id:
                                 continue
@@ -232,11 +232,12 @@ async def analyze(
                                 url_path = _extract_path(call["url"])
                                 if not url_path:
                                     continue
-                                matched_path = match_url_to_endpoint(url_path, known_paths)
+                                candidates = [e for e in known_endpoints if e["method"] == call.get("method")]
+                                matched_path = match_url_to_endpoint(url_path, [e["path"] for e in candidates])
                                 if matched_path is None:
                                     continue
                                 matched_endpoint = next(
-                                    (e for e in known_endpoints if e["path"] == matched_path), None
+                                    (e for e in candidates if e["path"] == matched_path), None
                                 )
                                 if matched_endpoint is None or matched_endpoint["service_id"] == service_id:
                                     continue

@@ -357,7 +357,7 @@ async def test_analyze_edge_upsert_sql_has_on_conflict_do_update_last_seen_at(tm
          patch("routers.analyze.parse_service", return_value=None), \
          patch("routers.analyze.extract_route_decorators", return_value=[]), \
          patch("routers.analyze.extract_http_calls",
-               return_value=[{"url": "http://user-service/users/123"}]), \
+               return_value=[{"url": "http://user-service/users/123", "method": "GET"}]), \
          patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -396,7 +396,7 @@ async def test_analyze_edge_upsert_source_arg_is_static(tmp_path):
          patch("routers.analyze.parse_service", return_value=None), \
          patch("routers.analyze.extract_route_decorators", return_value=[]), \
          patch("routers.analyze.extract_http_calls",
-               return_value=[{"url": "http://user-service/users/123"}]), \
+               return_value=[{"url": "http://user-service/users/123", "method": "GET"}]), \
          patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

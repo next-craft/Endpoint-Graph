@@ -191,7 +191,7 @@ def extract_route_decorators(file_path: str) -> list[dict]:
             if method_node is None or path_node is None:
                 continue
             method_text = method_node.text.decode("utf-8").upper()
-            if method_text not in {"GET", "POST", "PUT", "DELETE"}:
+            if method_text not in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
                 continue
             if _is_fstring(path_node):
                 continue
@@ -292,19 +292,25 @@ def extract_http_calls(file_path: str) -> list[dict]:
             if lib_text not in {"requests", "httpx"}:
                 continue
             method_text = method_node.text.decode("utf-8")
-            if method_text not in {"get", "post", "put", "delete"}:
+            if method_text not in {"get", "post", "put", "delete", "patch"}:
                 continue
             if _is_fstring(url_node):
                 pattern = _reconstruct_fstring(url_node)
                 path = _extract_path_from_pattern(pattern)
                 if path is None:
                     continue
-                results.append({"url": path, "caller_function_name": _enclosing_py_function_name(url_node)})
+                results.append({
+                    "url": path, "method": method_text.upper(),
+                    "caller_function_name": _enclosing_py_function_name(url_node),
+                })
                 continue
             url_value = _node_string_value(url_node)
             if url_value is None:
                 continue
-            results.append({"url": url_value, "caller_function_name": _enclosing_py_function_name(url_node)})
+            results.append({
+                "url": url_value, "method": method_text.upper(),
+                "caller_function_name": _enclosing_py_function_name(url_node),
+            })
         return results
     except Exception:
         return []
@@ -336,7 +342,7 @@ def extract_js_routes(file_path: str) -> list[dict]:
             if method_node is None or path_node is None:
                 continue
             method = method_node.text.decode("utf-8").upper()
-            if method not in {"GET", "POST", "PUT", "DELETE"}:
+            if method not in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
                 continue
             raw = path_node.text.decode("utf-8")
             if raw.startswith("`"):
@@ -373,7 +379,7 @@ def extract_js_routes(file_path: str) -> list[dict]:
                 if name_node is None:
                     continue
                 name_text = name_node.text.decode("utf-8")
-                if name_text in {"GET", "POST", "PUT", "DELETE"}:
+                if name_text in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
                     results.append({
                         "method": name_text, "path": api_path,
                         "spec_source": "nextjs_route", "function_name": name_text,
@@ -396,7 +402,7 @@ def _is_axios_call(match) -> bool:
         return False
     if lib_node.text.decode("utf-8") != "axios":
         return False
-    return method_node.text.decode("utf-8") in {"get", "post", "put", "delete"}
+    return method_node.text.decode("utf-8") in {"get", "post", "put", "delete", "patch"}
 
 
 def _resolve_plain_string_url(url_node) -> str | None:
@@ -410,12 +416,45 @@ def _resolve_plain_string_url(url_node) -> str | None:
     return url if isinstance(url, str) else None
 
 
+def _axios_call_method(match, url_node) -> str:
+    method_node = match.get("method")
+    return method_node.text.decode("utf-8").upper() if method_node is not None else "GET"
+
+
+def _fetch_call_method(match, url_node) -> str:
+    # fetch(url) defaults to GET unless a second-argument options object
+    # supplies an explicit method: "..." — mirrors the Fetch API's own default.
+    args_node = url_node.parent
+    if args_node is not None:
+        for sibling in args_node.children:
+            if sibling.type != "object":
+                continue
+            for prop in sibling.children:
+                if prop.type != "pair":
+                    continue
+                key_node = prop.child_by_field_name("key")
+                value_node = prop.child_by_field_name("value")
+                if key_node is None or value_node is None or value_node.type != "string":
+                    continue
+                key_text = key_node.text.decode("utf-8").strip("'\"")
+                if key_text != "method":
+                    continue
+                raw = value_node.text.decode("utf-8")
+                try:
+                    method_value = ast.literal_eval(raw)
+                except Exception:
+                    continue
+                if isinstance(method_value, str) and method_value:
+                    return method_value.upper()
+    return "GET"
+
+
 def _resolve_template_url(url_node, source: bytes) -> str | None:
     pattern = _reconstruct_template_string(url_node, source)
     return _extract_path_from_pattern(pattern)
 
 
-def _collect_js_calls(query, tree_root, is_valid_call, resolve_url, file_path) -> list[dict]:
+def _collect_js_calls(query, tree_root, is_valid_call, resolve_url, resolve_method, file_path) -> list[dict]:
     out = []
     for _, match in query.matches(tree_root):
         url_node = match.get("url")
@@ -425,6 +464,7 @@ def _collect_js_calls(query, tree_root, is_valid_call, resolve_url, file_path) -
         if url is not None:
             out.append({
                 "url": url,
+                "method": resolve_method(match, url_node),
                 "file_path": file_path,
                 "caller_function_name": _enclosing_js_function_name(url_node),
             })
@@ -446,7 +486,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
   arguments: (arguments
     (string) @url))
 """)
-        results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url, file_path)
+        results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url, _fetch_call_method, file_path)
 
         # axios.get/post/put/delete("url")
         axios_query = lang.query("""
@@ -457,7 +497,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
   arguments: (arguments
     (string) @url))
 """)
-        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url, file_path)
+        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url, _axios_call_method, file_path)
 
         # fetch(`template literal`)
         fetch_template_query = lang.query("""
@@ -468,7 +508,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
 """)
         results += _collect_js_calls(
             fetch_template_query, root, _is_fetch_call,
-            lambda url_node: _resolve_template_url(url_node, source), file_path,
+            lambda url_node: _resolve_template_url(url_node, source), _fetch_call_method, file_path,
         )
 
         # axios.get/post/put/delete(`template literal`)
@@ -482,7 +522,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
 """)
         results += _collect_js_calls(
             axios_template_query, root, _is_axios_call,
-            lambda url_node: _resolve_template_url(url_node, source), file_path,
+            lambda url_node: _resolve_template_url(url_node, source), _axios_call_method, file_path,
         )
 
         return results
