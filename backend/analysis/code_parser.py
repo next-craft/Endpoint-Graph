@@ -33,6 +33,27 @@ HTTP_CALL_QUERY = PY_LANGUAGE.query("""
     (string) @url))
 """)
 
+ROUTER_PREFIX_QUERY = PY_LANGUAGE.query("""
+(assignment
+  right: (call
+    function: (identifier) @callee
+    arguments: (argument_list
+      (keyword_argument
+        name: (identifier) @kwname
+        value: (string) @kwvalue))))
+""")
+
+INCLUDE_ROUTER_QUERY = PY_LANGUAGE.query("""
+(call
+  function: (attribute
+    attribute: (identifier) @method)
+  arguments: (argument_list
+    . (_) @router_ref
+    (keyword_argument
+      name: (identifier) @kwname
+      value: (string) @kwvalue)))
+""")
+
 _SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
@@ -182,6 +203,78 @@ def extract_route_decorators(file_path: str) -> list[dict]:
         return results
     except Exception:
         return []
+
+
+def extract_router_local_prefix(file_path: str) -> str | None:
+    """Return the prefix passed to `<var> = APIRouter(prefix="...")` in this file, if any.
+
+    A decorator's own path (e.g. `@router.get("/{slug}")`) is only the suffix mounted
+    under this router-level prefix -- without it, `/colleges/{slug}` gets recorded as
+    just `/{slug}`, which degrades to an overly generic single-segment regex in
+    url_matcher and both misses real matches and creates false ones."""
+    try:
+        source = open(file_path, "rb").read()
+        tree = parser.parse(source)
+        for _, match in ROUTER_PREFIX_QUERY.matches(tree.root_node):
+            callee_node = match.get("callee")
+            kwname_node = match.get("kwname")
+            kwvalue_node = match.get("kwvalue")
+            if callee_node is None or kwname_node is None or kwvalue_node is None:
+                continue
+            if callee_node.text.decode("utf-8") != "APIRouter":
+                continue
+            if kwname_node.text.decode("utf-8") != "prefix":
+                continue
+            value = _node_string_value(kwvalue_node)
+            if value:
+                return value
+        return None
+    except Exception:
+        return None
+
+
+def extract_include_router_mounts(file_path: str) -> list[dict]:
+    """Return the mount prefix of every `<app>.include_router(<ref>, prefix="...")` call
+    in this file, alongside the module name `<ref>` was accessed through when it's an
+    attribute access (e.g. `colleges.router` -> module_name="colleges"). A bare
+    identifier ref (no import tracing) yields module_name=None and is left unresolved."""
+    try:
+        source = open(file_path, "rb").read()
+        tree = parser.parse(source)
+        results = []
+        for _, match in INCLUDE_ROUTER_QUERY.matches(tree.root_node):
+            method_node = match.get("method")
+            router_ref_node = match.get("router_ref")
+            kwname_node = match.get("kwname")
+            kwvalue_node = match.get("kwvalue")
+            if method_node is None or router_ref_node is None or kwname_node is None or kwvalue_node is None:
+                continue
+            if method_node.text.decode("utf-8") != "include_router":
+                continue
+            if kwname_node.text.decode("utf-8") != "prefix":
+                continue
+            prefix_value = _node_string_value(kwvalue_node)
+            if prefix_value is None:
+                continue
+            module_name = None
+            if router_ref_node.type == "attribute":
+                obj_node = router_ref_node.child_by_field_name("object")
+                if obj_node is not None and obj_node.type == "identifier":
+                    module_name = obj_node.text.decode("utf-8")
+            results.append({"module_name": module_name, "prefix": prefix_value})
+        return results
+    except Exception:
+        return []
+
+
+def compose_route_path(*parts: str) -> str:
+    """Join API path fragments (mount prefix, router-local prefix, decorator path) into
+    one normalized path. Each fragment may be '', '/', or '/things' -- an empty decorator
+    path (e.g. `@router.get("")`, FastAPI's way of exposing the prefix's own root)
+    contributes nothing beyond whatever prefixes it's mounted under."""
+    segments = [p.strip("/") for p in parts if p and p.strip("/")]
+    joined = "/".join(segments)
+    return "/" + joined if joined else "/"
 
 
 def extract_http_calls(file_path: str) -> list[dict]:

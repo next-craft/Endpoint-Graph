@@ -14,6 +14,9 @@ from analysis.code_parser import (
     extract_http_calls,
     extract_js_routes,
     extract_js_http_calls,
+    extract_router_local_prefix,
+    extract_include_router_mounts,
+    compose_route_path,
     detect_service_language,
 )
 from analysis.url_matcher import match_url_to_endpoint
@@ -110,17 +113,32 @@ async def analyze(
                         ]
                     else:
                         discovered = []
+                        py_files = [
+                            p for p in glob.glob(os.path.join(folder_path, "**", "*.py"), recursive=True)
+                            if _safe_path(p, tmp_dir) and not _is_in_ignored_dir(p, folder_path)
+                        ]
+
+                        # A route's real path is prefix_from_include_router + prefix_from_APIRouter +
+                        # its own decorator path (e.g. "/v1" + "/colleges" + "/{slug}"). Both prefixes
+                        # can live in files other than the one declaring the route, so resolve them
+                        # across the whole service folder before extracting any decorators.
+                        router_prefix_by_file = {p: extract_router_local_prefix(p) for p in py_files}
+                        mount_prefix_by_module = {}
+                        for p in py_files:
+                            for mount in extract_include_router_mounts(p):
+                                if mount["module_name"]:
+                                    mount_prefix_by_module[mount["module_name"]] = mount["prefix"]
+
                         # Python route decorators
-                        for py_file in glob.glob(os.path.join(folder_path, "**", "*.py"), recursive=True):
-                            if not _safe_path(py_file, tmp_dir):
-                                continue
-                            if _is_in_ignored_dir(py_file, folder_path):
-                                continue
+                        for py_file in py_files:
                             rel_path = os.path.relpath(py_file, folder_path).replace(os.sep, "/")
+                            module_name = os.path.splitext(os.path.basename(py_file))[0]
+                            mount_prefix = mount_prefix_by_module.get(module_name, "")
+                            router_prefix = router_prefix_by_file.get(py_file) or ""
                             for ep in extract_route_decorators(py_file):
                                 discovered.append({
                                     "method": ep["method"],
-                                    "path": ep["path"],
+                                    "path": compose_route_path(mount_prefix, router_prefix, ep["path"]),
                                     "spec_source": "decorator",
                                     "file_path": rel_path,
                                     "function_name": ep.get("function_name"),
