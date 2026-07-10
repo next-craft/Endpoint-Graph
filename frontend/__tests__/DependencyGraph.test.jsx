@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import DependencyGraph from '@/components/DependencyGraph'
 
 jest.mock('@xyflow/react', () => ({
-  ReactFlow: ({ nodes, onNodeClick, children }) => (
+  ReactFlow: ({ nodes, edges, onNodeClick, children }) => (
     <div data-testid="react-flow">
       {nodes.map((n) => (
         <div
@@ -17,12 +17,23 @@ jest.mock('@xyflow/react', () => ({
           {n.data.label}
         </div>
       ))}
+      {edges.map((e) => (
+        <div
+          key={e.id}
+          data-testid={`edge-${e.id}`}
+          data-stroke={e.style?.stroke ?? ''}
+          data-source-offset={e.data?.sourceOffset ?? 0}
+          data-target-offset={e.data?.targetOffset ?? 0}
+        />
+      ))}
       {children}
     </div>
   ),
   Background: () => <div data-testid="rf-background" />,
   Controls: () => <div data-testid="rf-controls" />,
   MiniMap: () => <div data-testid="rf-minimap" />,
+  BaseEdge: () => null,
+  getSmoothStepPath: () => ['', 0, 0],
 }))
 
 const endpointNode = {
@@ -138,6 +149,69 @@ test('test_dependency_graph_tiers_caller_only_above_provider_only_service', () =
   const callerGroupY = Number(screen.getByTestId('node-caller-only-svc').getAttribute('data-y'))
   const providerGroupY = Number(screen.getByTestId('node-provider-only-svc').getAttribute('data-y'))
   expect(callerGroupY).toBeLessThan(providerGroupY)
+})
+
+test('test_dependency_graph_fans_out_parallel_edges_between_stacked_columns', () => {
+  // 3 callers in one file group, each calling a distinct endpoint in another
+  // file group — all leaves stacked at the same x, so without fan-out every
+  // edge's source/target x would line up and overlap.
+  const callers = [0, 1, 2].map((i) => ({
+    ...callerNode,
+    id: `caller:1:lib/api.js:fn${i}`,
+    label: `fn${i}`,
+    function_name: `fn${i}`,
+  }))
+  const endpoints = [0, 1, 2].map((i) => ({
+    ...endpointNode,
+    id: `ep:${i}`,
+    label: `handler${i}`,
+    function_name: `handler${i}`,
+  }))
+  const edges = callers.map((c, i) => ({
+    source: c.id, target: endpoints[i].id, call_count: 1, last_seen_at: '2024-01-01T00:00:00Z',
+  }))
+
+  render(
+    <DependencyGraph nodes={[...endpoints, ...callers]} edges={edges} onNodeClick={jest.fn()} />
+  )
+
+  const sourceOffsets = edges.map((e) => Number(screen.getByTestId(`edge-${e.source}->${e.target}`).getAttribute('data-source-offset')))
+  const targetOffsets = edges.map((e) => Number(screen.getByTestId(`edge-${e.source}->${e.target}`).getAttribute('data-target-offset')))
+
+  // Each of the 3 stacked callers/endpoints must get a distinct offset so the
+  // 3 edges don't all connect at the same x.
+  expect(new Set(sourceOffsets).size).toBe(3)
+  expect(new Set(targetOffsets).size).toBe(3)
+})
+
+test('test_dependency_graph_colors_edges_by_caller', () => {
+  const otherCaller = { ...callerNode, id: 'caller:1:lib/api.js:otherFn', label: 'otherFn' }
+  const otherEndpoint = { ...endpointNode, id: 'ep:6', label: 'other_handler' }
+  const edges = [
+    ...oneEdge,
+    { source: callerNode.id, target: otherEndpoint.id, call_count: 1, last_seen_at: '2024-01-01T00:00:00Z' },
+    { source: otherCaller.id, target: endpointNode.id, call_count: 2, last_seen_at: '2024-01-01T00:00:00Z' },
+  ]
+
+  render(
+    <DependencyGraph
+      nodes={[endpointNode, otherEndpoint, callerNode, otherCaller]}
+      edges={edges}
+      onNodeClick={jest.fn()}
+    />
+  )
+
+  const colorFor = (source, target) => screen.getByTestId(`edge-${source}->${target}`).getAttribute('data-stroke')
+
+  const sameCallerColor1 = colorFor(callerNode.id, endpointNode.id)
+  const sameCallerColor2 = colorFor(callerNode.id, otherEndpoint.id)
+  const differentCallerColor = colorFor(otherCaller.id, endpointNode.id)
+
+  // Both edges from the same caller must share a color...
+  expect(sameCallerColor1).toBe(sameCallerColor2)
+  expect(sameCallerColor1).toBeTruthy()
+  // ...and a distinct caller must get a different (stable, hashed) color.
+  expect(differentCallerColor).not.toBe(sameCallerColor1)
 })
 
 test('test_dependency_graph_tiers_mixed_service_in_middle', () => {

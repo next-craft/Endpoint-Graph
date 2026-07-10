@@ -1,6 +1,6 @@
 'use client'
 import { useMemo } from 'react'
-import { ReactFlow, Background, Controls, MiniMap } from '@xyflow/react'
+import { ReactFlow, Background, Controls, MiniMap, BaseEdge, getSmoothStepPath } from '@xyflow/react'
 import dagre from '@dagrejs/dagre'
 import '@xyflow/react/dist/style.css'
 
@@ -38,12 +38,70 @@ const CALLER_LEAF_STYLE = {
 }
 
 const defaultEdgeOptions = {
-  type: 'smoothstep',
+  type: 'fanned',
   style: { stroke: '#29447e', strokeWidth: 1.5 },
   labelStyle: { fill: '#8a8a8a', fontSize: 10, fontFamily: 'ui-monospace, SFMono-Regular, monospace' },
   labelBgStyle: { fill: '#000000', fillOpacity: 0.85 },
   labelBgPadding: [5, 3],
 }
+
+// Per-caller stroke colors so each origin is identifiable even where fanned
+// paths cross near a shared endpoint.
+const EDGE_PALETTE = [
+  '#fca311', '#4cc9f0', '#80ed99', '#f72585', '#b5179e',
+  '#4361ee', '#ffd166', '#06d6a0', '#ef476f', '#c77dff',
+]
+
+function hashToIndex(str, mod) {
+  let hash = 0
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash) % mod
+}
+
+function colorForCaller(callerId) {
+  return EDGE_PALETTE[hashToIndex(callerId, EDGE_PALETTE.length)]
+}
+
+// Max horizontal shift for a fanned connection point, kept inside the leaf
+// node's own width so the line still visibly emerges from within the node.
+const FAN_SPACING = 26
+const FAN_MAX = LEAF_WIDTH / 2 - 24
+
+// Custom edge: same smoothstep routing as the default, but the source/target
+// connection point is nudged sideways per leaf index so edges between two
+// X-aligned, vertically-stacked columns fan out instead of overlapping.
+function FannedEdge({
+  id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition,
+  style, markerEnd, label, labelStyle, labelBgStyle, labelBgPadding, data,
+}) {
+  const [path, labelX, labelY] = getSmoothStepPath({
+    sourceX: sourceX + (data?.sourceOffset ?? 0),
+    sourceY,
+    sourcePosition,
+    targetX: targetX + (data?.targetOffset ?? 0),
+    targetY,
+    targetPosition,
+    borderRadius: 8,
+  })
+  return (
+    <BaseEdge
+      id={id}
+      path={path}
+      markerEnd={markerEnd}
+      style={style}
+      label={label}
+      labelX={labelX}
+      labelY={labelY}
+      labelStyle={labelStyle}
+      labelBgStyle={labelBgStyle}
+      labelBgPadding={labelBgPadding}
+    />
+  )
+}
+
+const edgeTypes = { fanned: FannedEdge }
 
 function buildElements(nodes, edges) {
   const byService = new Map()
@@ -90,6 +148,7 @@ function buildElements(nodes, edges) {
   for (const tier of tiers) tier.sort((a, b) => g.node(a).x - g.node(b).x)
 
   const rfNodes = []
+  const leafPosInGroup = new Map() // leaf id -> { index, count } within its file group
   tiers.forEach((tierServices, tierIndex) => {
     let cursorX = 0
     const tierY = tierIndex * TIER_ROW_GAP
@@ -129,18 +188,35 @@ function buildElements(nodes, edges) {
             data: { label: leaf.label, ...leaf },
             style: leaf.node_type === 'endpoint' ? ENDPOINT_LEAF_STYLE : CALLER_LEAF_STYLE,
           })
+          leafPosInGroup.set(leaf.id, { index: i, count: fl.leaves.length })
         })
       }
       cursorX += serviceWidth + SERVICE_COL_GAP
     }
   })
 
-  const rfEdges = edges.map((e) => ({
-    id: `${e.source}->${e.target}`,
-    source: e.source,
-    target: e.target,
-    label: `×${e.call_count}`,
-  }))
+  function fanOffset(leafId) {
+    const info = leafPosInGroup.get(leafId)
+    if (!info || info.count <= 1) return 0
+    const centered = info.index - (info.count - 1) / 2
+    return Math.max(-FAN_MAX, Math.min(FAN_MAX, centered * FAN_SPACING))
+  }
+
+  const rfEdges = edges.map((e) => {
+    const color = colorForCaller(e.source)
+    return {
+      id: `${e.source}->${e.target}`,
+      source: e.source,
+      target: e.target,
+      label: `×${e.call_count}`,
+      type: 'fanned',
+      style: { stroke: color, strokeWidth: 1.5 },
+      data: {
+        sourceOffset: fanOffset(e.source),
+        targetOffset: fanOffset(e.target),
+      },
+    }
+  })
 
   return { rfNodes, rfEdges }
 }
@@ -153,6 +229,7 @@ export default function DependencyGraph({ nodes, edges, onNodeClick }) {
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
+        edgeTypes={edgeTypes}
         onNodeClick={onNodeClick}
         defaultEdgeOptions={defaultEdgeOptions}
         fitView

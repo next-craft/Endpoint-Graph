@@ -62,19 +62,21 @@ test('shows Public badge text for public repos', () => {
   expect(screen.getByText('Public')).toBeInTheDocument()
 })
 
-test('Private badge has amber CSS classes', () => {
+test('Private badge uses the orange accent token (v2-open-issues.md issue 7)', () => {
   const privateRepo = { ...untrackedRepo, private: true }
   render(<RepoList repos={[privateRepo]} onUpdate={jest.fn()} />)
   const badge = screen.getByText('Private')
-  expect(badge.className).toContain('bg-amber-900')
-  expect(badge.className).toContain('text-amber-300')
+  expect(badge.className).toContain('bg-orange-100')
+  expect(badge.className).toContain('text-orange')
+  expect(badge.className).toContain('font-mono')
 })
 
-test('Public badge has green CSS classes', () => {
+test('Public badge uses the neutral prussian/alabaster tokens (v2-open-issues.md issue 7)', () => {
   render(<RepoList repos={[untrackedRepo]} onUpdate={jest.fn()} />)
   const badge = screen.getByText('Public')
-  expect(badge.className).toContain('bg-green-900')
-  expect(badge.className).toContain('text-green-300')
+  expect(badge.className).toContain('bg-prussian-400')
+  expect(badge.className).toContain('text-alabaster-300')
+  expect(badge.className).toContain('font-mono')
 })
 
 test('shows Never when last_analyzed_at is null', () => {
@@ -221,14 +223,44 @@ test('Untrack click calls deleteService with the repo service_id', async () => {
   })
 })
 
-test('Untrack click calls onUpdate with the untracked repo filtered out', async () => {
+test('Untrack click calls fetchUserRepos, then onUpdate with the refreshed list', async () => {
+  const refreshedList = [{ ...trackedRepo, tracked: false, service_id: null, last_analyzed_at: null }]
   deleteService.mockResolvedValue({ status: 'deleted' })
+  fetchUserRepos.mockResolvedValue(refreshedList)
   const onUpdate = jest.fn()
   render(<RepoList repos={[trackedRepo]} onUpdate={onUpdate} />)
   fireEvent.click(screen.getByRole('button', { name: 'Untrack' }))
   await waitFor(() => {
-    expect(onUpdate).toHaveBeenCalledWith([])
+    expect(fetchUserRepos).toHaveBeenCalled()
+    expect(onUpdate).toHaveBeenCalledWith(refreshedList)
   })
+})
+
+test('Untrack switches the row to untracked state immediately after delete, without waiting on the refetch (v2-open-issues.md issue 5)', async () => {
+  deleteService.mockResolvedValue({ status: 'deleted' })
+  fetchUserRepos.mockReturnValue(new Promise(() => {})) // never resolves
+  const onUpdate = jest.fn()
+  render(<RepoList repos={[trackedRepo]} onUpdate={onUpdate} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Untrack' }))
+  await waitFor(() => {
+    expect(onUpdate).toHaveBeenCalledWith([
+      { ...trackedRepo, tracked: false, service_id: null, last_analyzed_at: null },
+    ])
+  })
+})
+
+test('Untrack reflects untracked state even when the follow-up refetch fails, and does not show a row error', async () => {
+  deleteService.mockResolvedValue({ status: 'deleted' })
+  fetchUserRepos.mockRejectedValue(new Error('network error'))
+  const onUpdate = jest.fn()
+  render(<RepoList repos={[trackedRepo]} onUpdate={onUpdate} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Untrack' }))
+  await waitFor(() => {
+    expect(onUpdate).toHaveBeenCalledWith([
+      { ...trackedRepo, tracked: false, service_id: null, last_analyzed_at: null },
+    ])
+  })
+  expect(screen.queryByText('network error')).not.toBeInTheDocument()
 })
 
 test('Untrack shows "Untracking…" label and disables both row buttons while loading', async () => {
@@ -280,7 +312,7 @@ test('renders two repos independently with correct action buttons per tracked st
   expect(screen.getAllByRole('button', { name: 'Untrack' })).toHaveLength(1)
 })
 
-test('Untrack removes only the targeted repo when multiple repos are rendered', async () => {
+test('Untrack targets only the clicked repo\'s service_id when multiple repos are rendered', async () => {
   const anotherRepo = {
     name: 'other-repo',
     full_name: 'owner/other-repo',
@@ -290,7 +322,12 @@ test('Untrack removes only the targeted repo when multiple repos are rendered', 
     last_analyzed_at: null,
     service_id: 99,
   }
+  const refreshedList = [
+    { ...trackedRepo, tracked: false, service_id: null, last_analyzed_at: null },
+    anotherRepo,
+  ]
   deleteService.mockResolvedValue({ status: 'deleted' })
+  fetchUserRepos.mockResolvedValue(refreshedList)
   const onUpdate = jest.fn()
   render(<RepoList repos={[trackedRepo, anotherRepo]} onUpdate={onUpdate} />)
 
@@ -299,6 +336,6 @@ test('Untrack removes only the targeted repo when multiple repos are rendered', 
 
   await waitFor(() => {
     expect(deleteService).toHaveBeenCalledWith(42)
-    expect(onUpdate).toHaveBeenCalledWith([anotherRepo])
+    expect(onUpdate).toHaveBeenCalledWith(refreshedList)
   })
 })
