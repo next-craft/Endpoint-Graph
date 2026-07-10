@@ -412,6 +412,123 @@ async def test_analyze_edge_upsert_source_arg_is_static(tmp_path):
     assert source_arg == "static"
 
 
+class _EdgeCallCountStore:
+    """Fakes just enough of Postgres' ON CONFLICT (caller_service_id, endpoint_id,
+    caller_file_path, caller_function_name) DO UPDATE SET call_count =
+    call_count + 1 semantics for UPSERT_EDGE_SQL to verify re-analysis and
+    multi-caller behavior against the actual widened constraint (v2-open-issues.md
+    issues 3 and 4), instead of only asserting the SQL text shape."""
+
+    def __init__(self):
+        self.rows = {}
+
+    async def execute(self, sql, *args):
+        if "INSERT INTO consumer_edges" not in sql:
+            return None
+        caller_service_id, endpoint_id, source, caller_file_path, caller_function_name = args
+        key = (caller_service_id, endpoint_id, caller_file_path, caller_function_name)
+        row = self.rows.get(key)
+        if row is None:
+            self.rows[key] = {"call_count": 1, "source": source}
+        else:
+            row["call_count"] += 1
+            row["source"] = source
+        return None
+
+
+async def test_analyze_edge_call_count_increments_on_reanalysis(tmp_path):
+    """Re-analyzing the same repo twice must bump call_count to 2 on the second
+    pass, not reset it to 1 (v2-open-issues.md issue 3)."""
+    svc_dir = tmp_path / "order-service"
+    svc_dir.mkdir()
+    (svc_dir / "main.py").write_text("# service")
+
+    svc_row = _Row({"id": 2})
+    ep_row = _Row({"id": 5, "method": "GET", "path": "/users/{id}", "service_id": 10})
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=svc_row)
+    conn.fetch = AsyncMock(return_value=[ep_row])
+    store = _EdgeCallCountStore()
+    conn.execute = store.execute
+    pool = _make_pool(conn)
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_route_decorators", return_value=[]), \
+         patch("routers.analyze.extract_http_calls",
+               return_value=[{"url": "http://user-service/users/123", "method": "GET"}]), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post(
+                ANALYZE_URL, json={"repo_url": "github.com/test/repo"}, headers=HEADERS
+            )
+            second = await client.post(
+                ANALYZE_URL, json={"repo_url": "github.com/test/repo"}, headers=HEADERS
+            )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(store.rows) == 1
+    assert next(iter(store.rows.values()))["call_count"] == 2
+
+
+async def test_analyze_two_callers_same_service_same_endpoint_produce_two_edges(tmp_path):
+    """Two distinct caller functions (different files) in the same caller service,
+    both calling the same endpoint, must produce two distinct consumer_edges rows —
+    not one row where the second overwrites the first (v2-open-issues.md issue 4)."""
+    # A single physical .js file — extract_js_http_calls is mocked below, so its
+    # contents don't matter, but glob must find exactly one file so the mock is
+    # invoked exactly once (returning both call-site dicts together), matching
+    # how the real per-file scan would surface two call sites in one file.
+    caller_dir = tmp_path / "frontend"
+    caller_dir.mkdir()
+    (caller_dir / "package.json").write_text("{}")
+    (caller_dir / "api.js").write_text("// caller a and b")
+
+    svc_row = _Row({"id": 1})
+    ep_row = _Row({"id": 10, "method": "GET", "path": "/users/{id}", "service_id": 100})
+
+    conn = AsyncMock()
+    conn.fetchrow = AsyncMock(return_value=svc_row)
+    conn.fetch = AsyncMock(return_value=[ep_row])
+    store = _EdgeCallCountStore()
+    conn.execute = store.execute
+    pool = _make_pool(conn)
+
+    calls = [
+        {
+            "url": "http://backend/users/1", "method": "GET",
+            "file_path": str(caller_dir / "api.js"), "caller_function_name": "fetchUserA",
+        },
+        {
+            "url": "http://backend/users/1", "method": "GET",
+            "file_path": str(caller_dir / "api.js"), "caller_function_name": "fetchUserB",
+        },
+    ]
+
+    with patch("routers.analyze.clone_repo", return_value=str(tmp_path)), \
+         patch("routers.analyze.delete_repo"), \
+         patch("routers.analyze.parse_service", return_value=None), \
+         patch("routers.analyze.extract_js_routes", return_value=[]), \
+         patch("routers.analyze.extract_http_calls", return_value=[]), \
+         patch("routers.analyze.extract_js_http_calls", return_value=calls), \
+         patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
+        mock_gp.return_value = pool
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                ANALYZE_URL, json={"repo_url": "github.com/test/repo"}, headers=HEADERS
+            )
+
+    assert resp.status_code == 200
+    assert resp.json()["edges"] == 2
+    assert len(store.rows) == 2
+    caller_function_names = {key[3] for key in store.rows}
+    assert caller_function_names == {"fetchUserA", "fetchUserB"}
+
+
 # ---------------------------------------------------------------------------
 # Analyze route — service name and service count
 # ---------------------------------------------------------------------------

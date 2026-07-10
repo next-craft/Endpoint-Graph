@@ -67,8 +67,9 @@ def _is_in_ignored_dir(file_path: str, root: str) -> bool:
 UPSERT_EDGE_SQL = """INSERT INTO consumer_edges
     (caller_service_id, endpoint_id, last_seen_at, call_count, source, caller_file_path, caller_function_name)
 VALUES ($1, $2, NOW(), 1, $3, $4, $5)
-ON CONFLICT (caller_service_id, endpoint_id)
-DO UPDATE SET last_seen_at = NOW(), source = EXCLUDED.source,
+ON CONFLICT (caller_service_id, endpoint_id, caller_file_path, caller_function_name)
+DO UPDATE SET call_count = consumer_edges.call_count + 1,
+              last_seen_at = NOW(), source = EXCLUDED.source,
               caller_file_path = EXCLUDED.caller_file_path,
               caller_function_name = EXCLUDED.caller_function_name"""
 
