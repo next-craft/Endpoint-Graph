@@ -172,6 +172,15 @@ describe('GraphPageInner - happy path', () => {
     expect(screen.queryByTestId('impact-panel')).not.toBeInTheDocument()
   })
 
+  test('header includes a Repos link back to /repos (v2-open-issues.md issue 6)', async () => {
+    mockSearchParamsGet.mockReturnValue(null)
+
+    render(<GraphPageInner />)
+
+    const reposLink = screen.getByRole('link', { name: /Repos/ })
+    expect(reposLink).toHaveAttribute('href', '/repos')
+  })
+
   test('logout button signs out of supabase and redirects to /login', async () => {
     mockSearchParamsGet.mockReturnValue(null)
     const originalLocation = window.location

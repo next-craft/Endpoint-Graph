@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'next/navigation'
+import Link from 'next/link'
 import dynamic from 'next/dynamic'
 import AuthGuard from '@/components/AuthGuard'
 import ImpactPanel from '@/components/ImpactPanel'
@@ -141,6 +142,15 @@ export default function GraphPageInner() {
               EndpointGraph
             </span>
           </div>
+
+          <div className="w-px h-6 bg-prussian-600 shrink-0" />
+
+          <Link
+            href="/repos"
+            className="text-alabaster-300 hover:text-alabaster text-xs font-mono shrink-0 transition-colors"
+          >
+            ← Repos
+          </Link>
 
           <div className="w-px h-6 bg-prussian-600 shrink-0" />
 
