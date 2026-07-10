@@ -55,3 +55,44 @@ def test_no_match_returns_none():
 def test_uuid_segment():
     uuid = "550e8400-e29b-41d4-a716-446655440000"
     assert match_url_to_endpoint(f"/users/{uuid}", ["/users/{id}"]) == "/users/{id}"
+
+
+# ── Issue 12: suffix-match fallback for baseURL-supplied mount prefixes ────────
+
+def test_suffix_match_with_mount_prefix():
+    # The caller's literal string never spells out "/v1" -- its axios baseURL
+    # supplies it at runtime -- but the stored endpoint path has it composed in
+    # (from APIRouter(prefix="/v1")). Exact match fails; suffix match must catch it.
+    assert match_url_to_endpoint("/users/me", ["/v1/users/me"]) == "/v1/users/me"
+
+
+def test_suffix_match_with_param_in_known_path():
+    assert match_url_to_endpoint("/users/123", ["/v1/users/{id}"]) == "/v1/users/{id}"
+
+
+def test_suffix_match_prefers_fewest_unaccounted_segments():
+    # Both candidates suffix-match "/users/me" -- the /v1 one is the tighter fit.
+    result = match_url_to_endpoint("/users/me", ["/v2/api/users/me", "/v1/users/me"])
+    assert result == "/v1/users/me"
+
+
+def test_exact_match_still_wins_over_suffix_match():
+    # An exact match must never be skipped in favor of a fallback suffix match,
+    # even when a shorter/prefixed candidate is listed first.
+    result = match_url_to_endpoint("/users/me", ["/v1/users/me", "/users/me"])
+    assert result == "/users/me"
+
+
+def test_suffix_match_requires_contiguous_trailing_segments():
+    # "/v1/me" is not the trailing 2 segments of "/v1/users/me" ("users/me" is) --
+    # a match here would mean segments are being matched positionally-anywhere
+    # rather than as a genuine trailing slice.
+    assert match_url_to_endpoint("/v1/me", ["/v1/users/me"]) is None
+
+
+def test_no_suffix_match_when_call_has_more_segments_than_known():
+    assert match_url_to_endpoint("/users/123/extra", ["/v1/users/{id}"]) is None
+
+
+def test_no_suffix_match_when_trailing_segments_dont_align():
+    assert match_url_to_endpoint("/orders/me", ["/v1/users/me"]) is None
