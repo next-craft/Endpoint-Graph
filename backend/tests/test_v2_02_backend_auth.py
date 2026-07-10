@@ -180,7 +180,9 @@ async def test_expired_token_detail_is_exactly_token_expired():
     token = _sign_token(priv, {
         "sub": "any-uuid",
         "aud": "authenticated",
-        "exp": int(time.time()) - 1,
+        # Beyond the 30s clock-skew leeway in get_current_user_id (see auth.py) --
+        # a token expired by only a second or two is now intentionally tolerated.
+        "exp": int(time.time()) - 60,
     })
     with _mock_jwks(pub):
         with pytest.raises(HTTPException) as exc:

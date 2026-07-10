@@ -27,6 +27,7 @@ async def get_current_user_id(authorization: str = Header()) -> str:
             signing_key.key,
             algorithms=["ES256"],
             audience="authenticated",
+            leeway=30,
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")

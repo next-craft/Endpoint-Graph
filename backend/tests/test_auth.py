@@ -96,6 +96,32 @@ async def test_get_current_user_id_invalid_signature():
 
 
 # ---------------------------------------------------------------------------
+# test_get_current_user_id_tolerates_small_clock_skew
+# ---------------------------------------------------------------------------
+
+async def test_get_current_user_id_tolerates_small_clock_skew():
+    # Supabase stamps iat using its own server clock. If this machine's
+    # system clock is a few seconds behind, a freshly issued token's iat
+    # lands slightly in the future relative to the local clock -- PyJWT
+    # rejects that outright unless leeway absorbs the drift.
+    private_key, public_key = _make_es256_keypair()
+    payload = {
+        "sub": "test-uuid-skew",
+        "aud": "authenticated",
+        "iat": int(time.time()) + 10,  # 10 seconds "in the future" locally
+        "exp": int(time.time()) + 3600,
+    }
+    token = jwt.encode(payload, private_key, algorithm="ES256")
+
+    mock_signing_key = _make_signing_key_mock(public_key)
+    with patch.object(auth_module, "_jwks_client") as mock_client:
+        mock_client.get_signing_key_from_jwt.return_value = mock_signing_key
+        result = await get_current_user_id(authorization=f"Bearer {token}")
+
+    assert result == "test-uuid-skew"
+
+
+# ---------------------------------------------------------------------------
 # test_get_current_user_id_valid_token
 # ---------------------------------------------------------------------------
 
