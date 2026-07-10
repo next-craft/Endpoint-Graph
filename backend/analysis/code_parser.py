@@ -316,7 +316,7 @@ def extract_http_calls(file_path: str) -> list[dict]:
         return []
 
 
-def extract_js_routes(file_path: str) -> list[dict]:
+def extract_js_routes(file_path: str, axios_identifiers: frozenset[str] = frozenset({"axios"})) -> list[dict]:
     try:
         lang, p = _get_js_parser(file_path)
         source = open(file_path, "rb").read()
@@ -325,21 +325,33 @@ def extract_js_routes(file_path: str) -> list[dict]:
 
         # Case A — Express-style route declarations
         # Matches any object method call whose method is get/post/put/delete and
-        # whose first argument is a string literal. This is intentionally broad —
-        # Express apps use arbitrary variable names (app, router, api, v1, etc.)
-        # so restricting by object name would miss valid routes.
+        # whose first argument is a string literal. This is intentionally broad on
+        # the object name — Express apps use arbitrary variable names (app, router,
+        # api, v1, etc.) so restricting by object name would miss valid routes.
+        # It is NOT broad on arity: a real Express route always passes a handler
+        # (or middleware chain ending in one) as the argument right after the path,
+        # which is what distinguishes `app.get('/x', handler)` from an unrelated
+        # single-arg call like `params.get('/x')` or `fd.get('/x')`.
+        # It also excludes any object identifier already known (via
+        # axios_identifiers, resolved by the caller from cross-file wrapped-axios-
+        # instance tracing — see file_exports_axios_instance/extract_default_imports)
+        # to be an axios client — `api.patch('/x', data)` is syntactically identical
+        # to `app.patch('/x', handler)` but is an HTTP call, not a route declaration.
         express_query = lang.query("""
 (call_expression
   function: (member_expression
-    object: (identifier)
+    object: (identifier) @object
     property: (property_identifier) @method)
   arguments: (arguments
     (string) @path))
 """)
         for _, match in express_query.matches(tree.root_node):
+            object_node = match.get("object")
             method_node = match.get("method")
             path_node = match.get("path")
-            if method_node is None or path_node is None:
+            if object_node is None or method_node is None or path_node is None:
+                continue
+            if object_node.text.decode("utf-8") in axios_identifiers:
                 continue
             method = method_node.text.decode("utf-8").upper()
             if method not in {"GET", "POST", "PUT", "DELETE", "PATCH"}:
@@ -353,14 +365,19 @@ def extract_js_routes(file_path: str) -> list[dict]:
                 continue
             if not isinstance(path_value, str):
                 continue
-            function_name = None
             next_named_sibling = path_node.next_named_sibling
-            if next_named_sibling is not None and next_named_sibling.type == "identifier":
+            if next_named_sibling is None or next_named_sibling.type not in {
+                "identifier", "arrow_function", "function"
+            }:
+                continue
+            function_name = None
+            if next_named_sibling.type == "identifier":
                 function_name = next_named_sibling.text.decode("utf-8")
             results.append({
                 "method": method, "path": path_value,
                 "spec_source": "decorator_js", "function_name": function_name,
             })
+
 
         # Case B — Next.js App Router file-based routes
         api_path = _nextjs_api_path(file_path)

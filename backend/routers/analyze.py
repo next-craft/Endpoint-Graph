@@ -94,7 +94,9 @@ def _axios_identifiers_by_file(js_files: list[str], folder_path: str) -> dict[st
     """Per file, the set of local identifiers that resolve to an axios instance --
     always includes the literal "axios", plus any default-imported local name traced
     back (via _resolve_module_path) to a file that creates and default-exports a
-    wrapped axios client (`const api = axios.create(...); export default api`)."""
+    wrapped axios client (`const api = axios.create(...); export default api`).
+    Shared by both route discovery (to avoid misreading `api.patch(path, data)` as an
+    Express route) and HTTP-call extraction (to recognize it as an axios call)."""
     axios_exporting_files = {
         os.path.realpath(p) for p in js_files if file_exports_axios_instance(p)
     }
@@ -190,16 +192,17 @@ async def analyze(
                                     "function_name": ep.get("function_name"),
                                 })
                         # JS/TS route decorators and Next.js file-based routes
-                        for pattern in ("**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"):
-                            for js_file in glob.glob(os.path.join(folder_path, pattern), recursive=True):
-                                if not _safe_path(js_file, tmp_dir):
-                                    continue
-                                if _is_in_ignored_dir(js_file, folder_path):
-                                    continue
-                                rel_path = os.path.relpath(js_file, folder_path).replace(os.sep, "/")
-                                for ep in extract_js_routes(js_file):
-                                    ep["file_path"] = rel_path
-                                    discovered.append(ep)
+                        route_js_files = [
+                            p for pattern in ("**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx")
+                            for p in glob.glob(os.path.join(folder_path, pattern), recursive=True)
+                            if _safe_path(p, tmp_dir) and not _is_in_ignored_dir(p, folder_path)
+                        ]
+                        route_axios_identifiers_by_file = _axios_identifiers_by_file(route_js_files, folder_path)
+                        for js_file in route_js_files:
+                            rel_path = os.path.relpath(js_file, folder_path).replace(os.sep, "/")
+                            for ep in extract_js_routes(js_file, route_axios_identifiers_by_file[js_file]):
+                                ep["file_path"] = rel_path
+                                discovered.append(ep)
 
                     lang = detect_service_language(folder_path)
                     row = await conn.fetchrow(

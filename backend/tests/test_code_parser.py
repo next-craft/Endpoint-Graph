@@ -329,6 +329,62 @@ def test_js_express_route_arrow_handler_no_function_name(tmp_path):
     assert result[0]["function_name"] is None
 
 
+def test_js_express_route_anonymous_function_handler(tmp_path):
+    f = tmp_path / "routes.js"
+    f.write_text("app.get('/users', function (req, res) {});\n")
+    result = extract_js_routes(str(f))
+    assert {"method": "GET", "path": "/users", "spec_source": "decorator_js", "function_name": None} in result
+
+
+# ── extract_js_routes — Issue 11: no handler arg must not fabricate a route ────
+
+def test_js_single_arg_get_call_on_bare_object_not_a_route(tmp_path):
+    """`api.get(url)` — a wrapped axios instance HTTP call, not an Express route
+    declaration — must not be mistaken for one just because the method name and a
+    lone string argument happen to match the Express shape."""
+    f = tmp_path / "queries.js"
+    f.write_text("async function useMe() { return (await api.get('/users/me')).data; }\n")
+    result = extract_js_routes(str(f))
+    assert result == []
+
+
+def test_js_urlsearchparams_get_call_not_a_route(tmp_path):
+    f = tmp_path / "utils.js"
+    f.write_text("function readId(params) { return params.get('/id'); }\n")
+    result = extract_js_routes(str(f))
+    assert result == []
+
+
+def test_js_formdata_get_call_not_a_route(tmp_path):
+    f = tmp_path / "utils.js"
+    f.write_text("function readFile(fd) { return fd.get('/file'); }\n")
+    result = extract_js_routes(str(f))
+    assert result == []
+
+
+def test_js_get_call_with_non_handler_second_arg_not_a_route(tmp_path):
+    """A second argument that isn't a function-like node (identifier / arrow /
+    function expression) — e.g. a plain options object — still isn't a route."""
+    f = tmp_path / "queries.js"
+    f.write_text("api.get('/users/me', { timeout: 5000 });\n")
+    result = extract_js_routes(str(f))
+    assert result == []
+
+
+def test_js_wrapped_axios_call_with_identifier_data_arg_not_a_route(tmp_path):
+    """`api.patch('/users/me', payload)` — a wrapped-axios HTTP call whose second
+    arg happens to be a plain identifier (the data payload, not a handler) — is
+    syntactically indistinguishable from `app.patch('/x', handler)` by node shape
+    alone. Passing axios_identifiers (resolved by the caller from cross-file
+    default-import tracing, same as Issue 10) is what disambiguates it."""
+    f = tmp_path / "queries.js"
+    f.write_text("const fn = (payload) => api.patch('/users/me', payload);\n")
+    assert extract_js_routes(str(f), frozenset({"api"})) == []
+    # Without knowing "api" is an axios instance, this shape is indistinguishable
+    # from a real Express route and is still (correctly) treated as one.
+    assert extract_js_routes(str(f), frozenset({"axios"})) != []
+
+
 # ── extract_js_routes — Next.js ────────────────────────────────────────────────
 
 def test_nextjs_get_route(tmp_path):
