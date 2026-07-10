@@ -76,13 +76,15 @@ def test_js_fetch_template_no_substitutions(tmp_path):
     ]
 
 
-def test_js_fetch_template_no_path_at_all_excluded(tmp_path):
+def test_js_fetch_template_bare_host_resolves_to_root_path(tmp_path):
     # Reconstructed pattern is just "{param}" (host only) -- no "/" anywhere,
-    # so _extract_path_from_pattern returns None and the call is dropped entirely.
+    # so _extract_path_from_pattern treats it as a request to the root path "/".
     src = "const API_HOST = 'svc';\nfetch(`${API_HOST}`);\n"
     f = tmp_path / "client.js"
     f.write_text(src)
-    assert extract_js_http_calls(str(f)) == []
+    assert extract_js_http_calls(str(f)) == [
+        {"url": "/", "method": "GET", "file_path": str(f), "caller_function_name": None}
+    ]
 
 
 def test_ts_fetch_template_literal_parity(tmp_path):
@@ -156,7 +158,7 @@ def test_requests_get_fstring_multiple_substitutions(tmp_path):
     ]
 
 
-def test_requests_get_fstring_no_path_skipped(tmp_path):
+def test_requests_get_fstring_bare_host_resolves_to_root_path(tmp_path):
     src = (
         "import requests\n"
         "HOST = 'svc'\n"
@@ -164,7 +166,7 @@ def test_requests_get_fstring_no_path_skipped(tmp_path):
     )
     f = tmp_path / "client.py"
     f.write_text(src)
-    assert extract_http_calls(str(f)) == []
+    assert extract_http_calls(str(f)) == [{"url": "/", "method": "GET", "caller_function_name": None}]
 
 
 def test_httpx_get_fstring_reconstructed(tmp_path):

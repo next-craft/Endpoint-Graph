@@ -73,7 +73,7 @@ def _safe_decode(raw: bytes) -> str:
         return ""
 
 
-def _extract_path_from_pattern(pattern: str) -> str | None:
+def _extract_path_from_pattern(pattern: str) -> str:
     # If the pattern starts with a scheme (http://, {param}:// is not valid
     # here since a scheme is always static), skip past "://" and any host
     # segment (static or "{param}") so the search lands on the real path
@@ -82,7 +82,7 @@ def _extract_path_from_pattern(pattern: str) -> str | None:
     search_from = match.end() if match else 0
     slash_idx = pattern.find("/", search_from)
     if slash_idx == -1:
-        return None  # no path at all (e.g. a bare host) — caller must skip this result
+        return "/"  # bare host, e.g. fetch(`${API_HOST}`) — request targets the root path
     return pattern[slash_idx:]
 
 
@@ -297,8 +297,6 @@ def extract_http_calls(file_path: str) -> list[dict]:
             if _is_fstring(url_node):
                 pattern = _reconstruct_fstring(url_node)
                 path = _extract_path_from_pattern(pattern)
-                if path is None:
-                    continue
                 results.append({
                     "url": path, "method": method_text.upper(),
                     "caller_function_name": _enclosing_py_function_name(url_node),
@@ -542,7 +540,7 @@ def _fetch_call_method(match, url_node) -> str:
     return "GET"
 
 
-def _resolve_template_url(url_node, source: bytes) -> str | None:
+def _resolve_template_url(url_node, source: bytes) -> str:
     pattern = _reconstruct_template_string(url_node, source)
     return _extract_path_from_pattern(pattern)
 
