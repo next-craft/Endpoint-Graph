@@ -24,6 +24,7 @@ const SESSION_WITH_TOKEN = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  window.sessionStorage.clear()
   process.env.NEXT_PUBLIC_API_URL = 'http://localhost:8000'
   supabase.auth.getSession.mockResolvedValue(SESSION_WITH_TOKEN)
   global.fetch = jest.fn().mockResolvedValue({
@@ -156,6 +157,33 @@ test('test_get_auth_headers_throws_when_provider_token_is_missing', async () => 
 
   await expect(triggerAnalysis('https://github.com/user/repo')).rejects.toThrow(
     'Session expired — please log in again'
+  )
+})
+
+test('test_get_auth_headers_falls_back_to_previously_captured_github_token_after_refresh', async () => {
+  // First call: provider_token is present (as it is right after the OAuth
+  // callback) — this call must both succeed and capture the token for later.
+  supabase.auth.getSession.mockResolvedValueOnce({
+    data: { session: { provider_token: 'captured-at-login', access_token: 'test-jwt' } },
+  })
+  await triggerAnalysis('https://github.com/user/repo')
+
+  // Second call: a background access-token refresh has dropped provider_token
+  // from the session (a documented Supabase behavior) — must not throw, and
+  // must still send the token captured on the first call.
+  supabase.auth.getSession.mockResolvedValue({
+    data: { session: { provider_token: null, access_token: 'test-jwt-2' } },
+  })
+  await triggerAnalysis('https://github.com/user/repo')
+
+  expect(global.fetch).toHaveBeenLastCalledWith(
+    'http://localhost:8000/analyze',
+    expect.objectContaining({
+      headers: expect.objectContaining({
+        'X-GitHub-Token': 'captured-at-login',
+        'Authorization': 'Bearer test-jwt-2',
+      }),
+    })
   )
 })
 

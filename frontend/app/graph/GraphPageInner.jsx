@@ -8,6 +8,7 @@ import SearchBar from '@/components/SearchBar'
 import { fetchGraph } from '@/lib/api'
 import { filterGraph } from '@/lib/graphFilter'
 import { supabase } from '@/lib/supabase'
+import { clearGithubToken } from '@/lib/githubToken'
 
 const DependencyGraph = dynamic(
   () => import('@/components/DependencyGraph'),
@@ -113,6 +114,7 @@ export default function GraphPageInner() {
 
   async function handleLogout() {
     await supabase.auth.signOut()
+    clearGithubToken()
     window.location.href = '/login'
   }
 

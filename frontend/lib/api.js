@@ -1,11 +1,19 @@
 import { supabase } from './supabase'
+import { storeGithubToken, getStoredGithubToken } from './githubToken'
 
 async function getAuthHeaders() {
   const { data: { session } } = await supabase.auth.getSession()
-  if (!session?.provider_token || !session?.access_token)
+  if (!session?.access_token)
+    throw new Error('Session expired — please log in again')
+  // session.provider_token isn't guaranteed to survive a background token
+  // refresh, so fall back to the copy captured at login (see githubToken.js)
+  // instead of failing every call after the first refresh.
+  if (session.provider_token) storeGithubToken(session.provider_token)
+  const githubToken = session.provider_token || getStoredGithubToken()
+  if (!githubToken)
     throw new Error('Session expired — please log in again')
   return {
-    'X-GitHub-Token': session.provider_token,
+    'X-GitHub-Token': githubToken,
     'Authorization': `Bearer ${session.access_token}`,
   }
 }
