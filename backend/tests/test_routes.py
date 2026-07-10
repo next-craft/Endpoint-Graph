@@ -279,7 +279,7 @@ async def test_analyze_consumer_edge_upserted(tmp_path):
          patch("routers.analyze.parse_service", return_value=None), \
          patch("routers.analyze.extract_route_decorators", return_value=[]), \
          patch("routers.analyze.extract_http_calls",
-               return_value=[{"url": "http://user-service/users/123"}]), \
+               return_value=[{"url": "http://user-service/users/123", "method": "GET"}]), \
          patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(
@@ -314,7 +314,7 @@ async def test_analyze_consumer_edge_includes_caller_context(tmp_path):
          patch("routers.analyze.parse_service", return_value=None), \
          patch("routers.analyze.extract_route_decorators", return_value=[]), \
          patch("routers.analyze.extract_http_calls",
-               return_value=[{"url": "http://user-service/users/123", "caller_function_name": "sync_user"}]), \
+               return_value=[{"url": "http://user-service/users/123", "method": "GET", "caller_function_name": "sync_user"}]), \
          patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(
@@ -361,6 +361,7 @@ async def test_analyze_js_consumer_edge_includes_caller_context(tmp_path):
          patch("routers.analyze.extract_js_http_calls",
                return_value=[{
                    "url": "http://user-service/users/123",
+                   "method": "GET",
                    "file_path": abs_js_file,
                    "caller_function_name": "fetchUser",
                }]), \
@@ -1200,7 +1201,7 @@ async def test_analyze_upsert_edge_idempotent(tmp_path):
          patch("routers.analyze.parse_service", return_value=None), \
          patch("routers.analyze.extract_route_decorators", return_value=[]), \
          patch("routers.analyze.extract_http_calls",
-               return_value=[{"url": "http://user-service/users/123"}]), \
+               return_value=[{"url": "http://user-service/users/123", "method": "GET"}]), \
          patch("routers.analyze.get_pool", new_callable=AsyncMock) as mock_gp:
         mock_gp.return_value = pool
         async with AsyncClient(
