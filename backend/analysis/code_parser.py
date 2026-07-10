@@ -395,25 +395,105 @@ def _is_fetch_call(match) -> bool:
     return fn_node is not None and fn_node.text.decode("utf-8") == "fetch"
 
 
-def _is_axios_call(match) -> bool:
+def _is_axios_call(match, known_identifiers: frozenset[str] = frozenset({"axios"})) -> bool:
     lib_node = match.get("lib")
     method_node = match.get("method")
     if lib_node is None or method_node is None:
         return False
-    if lib_node.text.decode("utf-8") != "axios":
+    if lib_node.text.decode("utf-8") not in known_identifiers:
         return False
     return method_node.text.decode("utf-8") in {"get", "post", "put", "delete", "patch"}
 
 
-def _resolve_plain_string_url(url_node) -> str | None:
-    raw = url_node.text.decode("utf-8")
+def file_exports_axios_instance(file_path: str) -> bool:
+    """True if this file both creates a wrapped axios client (`<var> = axios.create(...)`)
+    and exports that same variable as its default export (`export default <var>`).
+
+    Lets a call site that imports a project's shared client (e.g. `import api from
+    '@/lib/api'`, then `api.get(...)`) be recognized as an axios call even though it
+    never references the literal identifier "axios" -- the standard way of centralizing
+    baseURL/auth headers, and otherwise invisible to _is_axios_call's identifier check."""
+    try:
+        lang, p = _get_js_parser(file_path)
+        source = open(file_path, "rb").read()
+        tree = p.parse(source)
+        root = tree.root_node
+
+        instance_query = lang.query("""
+(variable_declarator
+  name: (identifier) @var
+  value: (call_expression
+    function: (member_expression
+      object: (identifier) @lib
+      property: (property_identifier) @method)))
+""")
+        instance_vars = set()
+        for _, match in instance_query.matches(root):
+            var_node = match.get("var")
+            lib_node = match.get("lib")
+            method_node = match.get("method")
+            if var_node is None or lib_node is None or method_node is None:
+                continue
+            if lib_node.text.decode("utf-8") != "axios" or method_node.text.decode("utf-8") != "create":
+                continue
+            instance_vars.add(var_node.text.decode("utf-8"))
+        if not instance_vars:
+            return False
+
+        export_query = lang.query("""
+(export_statement value: (identifier) @name)
+""")
+        for _, match in export_query.matches(root):
+            name_node = match.get("name")
+            if name_node is not None and name_node.text.decode("utf-8") in instance_vars:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def extract_default_imports(file_path: str) -> list[dict]:
+    """Return every default import in this file as {"local_name", "source"}, e.g.
+    `import api from '@/lib/api'` -> {"local_name": "api", "source": "@/lib/api"}.
+    Used to trace whether a locally-named import resolves to a file that
+    file_exports_axios_instance() recognizes as a wrapped axios client."""
+    try:
+        lang, p = _get_js_parser(file_path)
+        source = open(file_path, "rb").read()
+        tree = p.parse(source)
+        results = []
+        import_query = lang.query("""
+(import_statement
+  (import_clause (identifier) @local)
+  source: (string (string_fragment) @source))
+""")
+        for _, match in import_query.matches(tree.root_node):
+            local_node = match.get("local")
+            source_node = match.get("source")
+            if local_node is None or source_node is None:
+                continue
+            results.append({
+                "local_name": local_node.text.decode("utf-8"),
+                "source": source_node.text.decode("utf-8"),
+            })
+        return results
+    except Exception:
+        return []
+
+
+def _js_string_literal_value(node) -> str | None:
+    raw = node.text.decode("utf-8")
     if raw.startswith("`"):
         return None
     try:
-        url = ast.literal_eval(raw)
+        value = ast.literal_eval(raw)
     except Exception:
         return None
-    return url if isinstance(url, str) else None
+    return value if isinstance(value, str) else None
+
+
+def _resolve_plain_string_url(url_node) -> str | None:
+    return _js_string_literal_value(url_node)
 
 
 def _axios_call_method(match, url_node) -> str:
@@ -439,12 +519,8 @@ def _fetch_call_method(match, url_node) -> str:
                 key_text = key_node.text.decode("utf-8").strip("'\"")
                 if key_text != "method":
                     continue
-                raw = value_node.text.decode("utf-8")
-                try:
-                    method_value = ast.literal_eval(raw)
-                except Exception:
-                    continue
-                if isinstance(method_value, str) and method_value:
+                method_value = _js_string_literal_value(value_node)
+                if method_value:
                     return method_value.upper()
     return "GET"
 
@@ -471,13 +547,16 @@ def _collect_js_calls(query, tree_root, is_valid_call, resolve_url, resolve_meth
     return out
 
 
-def extract_js_http_calls(file_path: str) -> list[dict]:
+def extract_js_http_calls(file_path: str, axios_identifiers: frozenset[str] = frozenset({"axios"})) -> list[dict]:
     try:
         lang, p = _get_js_parser(file_path)
         source = open(file_path, "rb").read()
         tree = p.parse(source)
         root = tree.root_node
         results = []
+
+        def is_axios_call(match) -> bool:
+            return _is_axios_call(match, axios_identifiers)
 
         # fetch("url")
         fetch_query = lang.query("""
@@ -488,7 +567,8 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
 """)
         results += _collect_js_calls(fetch_query, root, _is_fetch_call, _resolve_plain_string_url, _fetch_call_method, file_path)
 
-        # axios.get/post/put/delete("url")
+        # axios.get/post/put/delete("url") -- or a wrapped instance's local identifier,
+        # e.g. api.get("url") where api = axios.create(...) (see axios_identifiers)
         axios_query = lang.query("""
 (call_expression
   function: (member_expression
@@ -497,7 +577,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
   arguments: (arguments
     (string) @url))
 """)
-        results += _collect_js_calls(axios_query, root, _is_axios_call, _resolve_plain_string_url, _axios_call_method, file_path)
+        results += _collect_js_calls(axios_query, root, is_axios_call, _resolve_plain_string_url, _axios_call_method, file_path)
 
         # fetch(`template literal`)
         fetch_template_query = lang.query("""
@@ -511,7 +591,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
             lambda url_node: _resolve_template_url(url_node, source), _fetch_call_method, file_path,
         )
 
-        # axios.get/post/put/delete(`template literal`)
+        # axios.get/post/put/delete(`template literal`) -- or a wrapped instance's identifier
         axios_template_query = lang.query("""
 (call_expression
   function: (member_expression
@@ -521,7 +601,7 @@ def extract_js_http_calls(file_path: str) -> list[dict]:
     (template_string) @url))
 """)
         results += _collect_js_calls(
-            axios_template_query, root, _is_axios_call,
+            axios_template_query, root, is_axios_call,
             lambda url_node: _resolve_template_url(url_node, source), _axios_call_method, file_path,
         )
 

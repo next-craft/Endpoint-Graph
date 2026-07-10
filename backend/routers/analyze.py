@@ -17,6 +17,8 @@ from analysis.code_parser import (
     extract_router_local_prefix,
     extract_include_router_mounts,
     compose_route_path,
+    file_exports_axios_instance,
+    extract_default_imports,
     detect_service_language,
 )
 from analysis.url_matcher import match_url_to_endpoint
@@ -62,6 +64,49 @@ def _is_in_ignored_dir(file_path: str, root: str) -> bool:
     """Return True if any path component between root and file_path is in IGNORED_DIRS."""
     rel = os.path.relpath(file_path, root)
     return any(part in IGNORED_DIRS for part in rel.split(os.sep))
+
+
+_JS_EXTENSIONS = (".js", ".jsx", ".ts", ".tsx")
+
+
+def _resolve_module_path(source: str, importing_file: str, folder_path: str) -> str | None:
+    """Best-effort resolution of an import specifier to an absolute file path within
+    the service folder. Handles the "@/" root alias (the common Next.js/webpack
+    jsconfig.json convention of `"@/*": ["./*"]` relative to the project root) and
+    relative "./"/"../" specifiers. Bare package specifiers (e.g. "axios",
+    "@tanstack/react-query") return None -- they aren't local files to resolve."""
+    if source.startswith("@/"):
+        base = os.path.join(folder_path, source[2:])
+    elif source.startswith("."):
+        base = os.path.normpath(os.path.join(os.path.dirname(importing_file), source))
+    else:
+        return None
+    candidates = [base]
+    candidates += [base + ext for ext in _JS_EXTENSIONS]
+    candidates += [os.path.join(base, "index" + ext) for ext in _JS_EXTENSIONS]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.realpath(candidate)
+    return None
+
+
+def _axios_identifiers_by_file(js_files: list[str], folder_path: str) -> dict[str, frozenset[str]]:
+    """Per file, the set of local identifiers that resolve to an axios instance --
+    always includes the literal "axios", plus any default-imported local name traced
+    back (via _resolve_module_path) to a file that creates and default-exports a
+    wrapped axios client (`const api = axios.create(...); export default api`)."""
+    axios_exporting_files = {
+        os.path.realpath(p) for p in js_files if file_exports_axios_instance(p)
+    }
+    result = {}
+    for p in js_files:
+        identifiers = {"axios"}
+        for imp in extract_default_imports(p):
+            resolved = _resolve_module_path(imp["source"], p, folder_path)
+            if resolved in axios_exporting_files:
+                identifiers.add(imp["local_name"])
+        result[p] = frozenset(identifiers)
+    return result
 
 
 UPSERT_EDGE_SQL = """INSERT INTO consumer_edges
@@ -222,31 +267,39 @@ async def analyze(
                             )
                             edges_count += 1
                     # JS/TS HTTP calls (extract_js_http_calls returns list[dict] with url/file_path/caller_function_name)
-                    for pattern in ("**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"):
-                        for js_file in glob.glob(os.path.join(folder_path, pattern), recursive=True):
-                            if not _safe_path(js_file, tmp_dir):
+                    js_files = [
+                        p for pattern in ("**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx")
+                        for p in glob.glob(os.path.join(folder_path, pattern), recursive=True)
+                        if _safe_path(p, tmp_dir) and not _is_in_ignored_dir(p, folder_path)
+                    ]
+
+                    # A call site that imports a wrapped axios client (e.g. `import api
+                    # from '@/lib/api'` where lib/api.js does `const api = axios.create(...);
+                    # export default api`) never references the literal identifier "axios",
+                    # so resolve which local names alias to an axios instance per file before
+                    # extracting HTTP calls.
+                    axios_identifiers_by_file = _axios_identifiers_by_file(js_files, folder_path)
+
+                    for js_file in js_files:
+                        for call in extract_js_http_calls(js_file, axios_identifiers_by_file[js_file]):
+                            url_path = _extract_path(call["url"])
+                            if not url_path:
                                 continue
-                            if _is_in_ignored_dir(js_file, folder_path):
+                            candidates = [e for e in known_endpoints if e["method"] == call.get("method")]
+                            matched_path = match_url_to_endpoint(url_path, [e["path"] for e in candidates])
+                            if matched_path is None:
                                 continue
-                            for call in extract_js_http_calls(js_file):
-                                url_path = _extract_path(call["url"])
-                                if not url_path:
-                                    continue
-                                candidates = [e for e in known_endpoints if e["method"] == call.get("method")]
-                                matched_path = match_url_to_endpoint(url_path, [e["path"] for e in candidates])
-                                if matched_path is None:
-                                    continue
-                                matched_endpoint = next(
-                                    (e for e in candidates if e["path"] == matched_path), None
-                                )
-                                if matched_endpoint is None or matched_endpoint["service_id"] == service_id:
-                                    continue
-                                caller_rel_path = os.path.relpath(call["file_path"], folder_path).replace(os.sep, "/")
-                                await conn.execute(
-                                    UPSERT_EDGE_SQL, service_id, matched_endpoint["id"], "static",
-                                    caller_rel_path, call.get("caller_function_name"),
-                                )
-                                edges_count += 1
+                            matched_endpoint = next(
+                                (e for e in candidates if e["path"] == matched_path), None
+                            )
+                            if matched_endpoint is None or matched_endpoint["service_id"] == service_id:
+                                continue
+                            caller_rel_path = os.path.relpath(call["file_path"], folder_path).replace(os.sep, "/")
+                            await conn.execute(
+                                UPSERT_EDGE_SQL, service_id, matched_endpoint["id"], "static",
+                                caller_rel_path, call.get("caller_function_name"),
+                            )
+                            edges_count += 1
 
     except ValueError:
         raise HTTPException(
